@@ -245,6 +245,7 @@ class MainWindow(QMainWindow):
         search_layout = QHBoxLayout()
         self.search_bar = QLineEdit()
         self.search_bar.setPlaceholderText("Search manga...")
+        self.search_bar.returnPressed.connect(self.search_manga)
         self.search_button = QPushButton("Search")
         self.search_button.clicked.connect(self.search_manga)
         
@@ -295,6 +296,10 @@ class MainWindow(QMainWindow):
     def search_manga(self):
         search_text = self.search_bar.text().strip()
         if search_text:
+            # If currently on detail view, switch back to grid view
+            if self.stacked_widget.currentWidget() == self.detail_page:
+                self.show_main_view()
+            
             # Disable search controls while loading
             self.search_bar.setEnabled(False)
             self.search_button.setEnabled(False)

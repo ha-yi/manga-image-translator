@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                             QPushButton, QLabel, QScrollArea, QFrame, QListWidget,
-                            QListWidgetItem, QMenuBar)
+                            QListWidgetItem, QMenuBar, QProgressBar)
 from PyQt6.QtCore import Qt, QObject, pyqtSignal
 from PyQt6.QtGui import QPixmap
 import requests
@@ -28,23 +28,57 @@ class ChapterListItem(QWidget):
     def __init__(self, chapter, parent=None):
         super().__init__(parent)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 5, 10, 5)
+        layout.setContentsMargins(16, 8, 16, 8)
         
-        # Chapter title
-        title = QLabel(chapter.title)
+        # Left side info
+        info_container = QVBoxLayout()
+        info_container.setSpacing(0)
+        
+        # Chapter title with number
+        title = QLabel(f"Chapter {chapter.number}")
         title.setStyleSheet("""
             font-weight: bold;
             color: #E0E0E0;
+            font-size: 14px;
+            background-color: transparent;
+            border: 0px;
         """)
-        layout.addWidget(title)
+        info_container.addWidget(title)
         
-        # Date if available
+         # Date if available
         if chapter.date:
             date = QLabel(chapter.date.strftime('%Y-%m-%d'))
-            date.setStyleSheet("color: #808080;")
-            layout.addWidget(date)
+            date.setStyleSheet("""
+                color: #808080;
+                font-size: 12px;
+                background-color: transparent;
+                border: 0px;
+            """)
+            info_container.addWidget(date)
         
-        layout.addStretch()
+        layout.addLayout(info_container)
+        
+        # Progress bar
+        progress_bar = QProgressBar()
+        progress_bar.setFixedHeight(8)
+        progress_bar.setValue(0)
+        progress_bar.setTextVisible(False)
+        progress_bar.setStyleSheet("""
+            QProgressBar {
+                background-color: #424242;
+                border: none;
+                border-radius: 4px;
+            }
+            QProgressBar::chunk {
+                background-color: #2196F3;
+                border-radius: 4px;
+            }
+        """)
+        layout.addWidget(progress_bar)
+        
+        # Right side with button
+        right_container = QHBoxLayout()
+        right_container.setSpacing(16)
         
         # Translate button
         translate_btn = QPushButton("Translate")
@@ -56,12 +90,15 @@ class ChapterListItem(QWidget):
                 border: none;
                 padding: 8px 16px;
                 border-radius: 4px;
+                font-size: 12px;
             }
             QPushButton:hover {
                 background-color: #1E88E5;
             }
         """)
-        layout.addWidget(translate_btn)
+        right_container.addWidget(translate_btn)
+        
+        layout.addLayout(right_container)
 
 class MangaDetailWindow(QWidget):
     image_loaded = pyqtSignal(QPixmap)  # Signal for image loading
@@ -87,10 +124,9 @@ class MangaDetailWindow(QWidget):
         self.main_layout.setContentsMargins(0, 0, 0, 0)
         self.main_layout.setSpacing(0)
         
-        # Setup basic UI structure
-        self.setup_header(self.main_layout)
-        self.setup_content(self.main_layout)
-        self.setup_chapter_list(self.main_layout)
+        # Setup UI structure
+        self.setup_header(self.main_layout)  # Fixed header
+        self.setup_scrollable_content(self.main_layout)  # Scrollable content
         
         # Apply styles
         self.apply_styles()
@@ -113,7 +149,10 @@ class MangaDetailWindow(QWidget):
         
         # Reset chapter count and list
         self.chapter_count.setText("Loading chapters...")
-        self.chapter_list.clear()
+        while self.chapters_layout.count():
+            child = self.chapters_layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
         
         # Clear description if exists
         if hasattr(self, 'description_label'):
@@ -125,6 +164,32 @@ class MangaDetailWindow(QWidget):
         # Load new details and cover image
         self.load_manga_details()
         threading.Thread(target=self._load_cover_image, daemon=True).start()
+    
+    def setup_scrollable_content(self, parent_layout):
+        # Create scroll area
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll_area.setStyleSheet("""
+            QScrollArea {
+                border: none;
+                background-color: #121212;
+            }
+        """)
+        
+        # Create container for scrollable content
+        scroll_content = QWidget()
+        scroll_layout = QVBoxLayout(scroll_content)
+        scroll_layout.setContentsMargins(0, 0, 0, 0)
+        scroll_layout.setSpacing(0)
+        
+        # Add content sections to scroll area
+        self.setup_content(scroll_layout)
+        self.setup_chapter_list(scroll_layout)
+        
+        # Set scroll content and add to main layout
+        scroll_area.setWidget(scroll_content)
+        parent_layout.addWidget(scroll_area)
     
     def setup_header(self, parent_layout):
         header = QFrame()
@@ -144,26 +209,31 @@ class MangaDetailWindow(QWidget):
         header_layout.addWidget(back_btn)
         
         # Modified title label
-        self.title_label.setWordWrap(True)
+        self.title_label.setWordWrap(False)  # Single line
         self.title_label.setStyleSheet("""
             font-size: 18pt; 
             font-weight: bold; 
             color: #FFFFFF;
-            line-height: 1.2;
+            border: 0px;
         """)
         self.title_label.setMinimumHeight(50)
+        # Set maximum width to enable automatic elision
+        self.title_label.setMaximumWidth(800)
         header_layout.addWidget(self.title_label)
         
+        # Add stretch to push title to the left
+        header_layout.addStretch()
+        
+        # Set fixed height for header
+        header.setFixedHeight(70)
         parent_layout.addWidget(header)
     
     def setup_content(self, parent_layout):
         content = QFrame()
         content.setStyleSheet("""
             QFrame {
-                background-color: #1E1E1E;
+                background-color: #121212;
                 margin: 16px;
-                border-radius: 8px;
-                border: 1px solid #333333;
             }
         """)
         content_layout = QHBoxLayout(content)
@@ -177,15 +247,13 @@ class MangaDetailWindow(QWidget):
         self.cover_label.setStyleSheet("""
             QLabel {
                 background-color: #2D2D2D;
-                border-radius: 8px;
-                border: 1px solid #333333;
             }
         """)
         content_layout.addWidget(self.cover_label)
         
         # Right side - Details
         details = QVBoxLayout()
-        details.setSpacing(16)
+        details.setSpacing(16)  # Increased spacing between elements
         
         # Title
         self.manga_title = QLabel(self.manga.title)
@@ -194,8 +262,7 @@ class MangaDetailWindow(QWidget):
             font-size: 24pt; 
             font-weight: bold; 
             color: #FFFFFF;
-            line-height: 1.2;
-            margin-bottom: 8px;
+            border: 0px;
         """)
         self.manga_title.setMinimumHeight(80)
         self.manga_title.setAlignment(Qt.AlignmentFlag.AlignTop)
@@ -203,20 +270,21 @@ class MangaDetailWindow(QWidget):
         
         # Rating
         rating_widget = QWidget()
+        rating_widget.setStyleSheet("background-color: transparent;border: 0px;")
         rating_layout = QHBoxLayout(rating_widget)
         rating_layout.setContentsMargins(0, 0, 0, 0)
         
         stars = int(self.manga.rating * 5 / 10)
         rating_text = "★" * stars + "☆" * (5 - stars)
         self.rating_label = QLabel(f"{rating_text} ({self.manga.rating}/10)")
-        self.rating_label.setStyleSheet("font-size: 16pt; color: #FFC107;")
+        self.rating_label.setStyleSheet("font-size: 16pt; color: #FFC107;border: 0px;")
         rating_layout.addWidget(self.rating_label)
         rating_layout.addStretch()
         details.addWidget(rating_widget)
         
         # Chapter count
         self.chapter_count = QLabel("Loading chapters...")
-        self.chapter_count.setStyleSheet("font-size: 14pt; color: #B0B0B0;")
+        self.chapter_count.setStyleSheet("font-size: 14pt; color: #B0B0B0;border: 0px;")
         details.addWidget(self.chapter_count)
         
         # Description
@@ -226,6 +294,7 @@ class MangaDetailWindow(QWidget):
             color: #9E9E9E; 
             font-size: 12pt; 
             line-height: 1.5;
+            border: 0px;
         """)
         details.addWidget(self.description_label)
         
@@ -257,31 +326,20 @@ class MangaDetailWindow(QWidget):
             font-size: 16pt;
             font-weight: bold;
             color: #FFFFFF;
-            padding: 16px;
-            border-bottom: 1px solid #333333;
-            background-color: #252525;
-            border-top-left-radius: 8px;
-            border-top-right-radius: 8px;
+            padding-top: 16px;
+            padding-bottom: 16px;
+            border: 0px;
+            background-color: transparent;
         """)
         chapter_layout.addWidget(list_header)
         
-        # Chapter list
-        self.chapter_list = QListWidget()
-        self.chapter_list.setStyleSheet("""
-            QListWidget {
-                background-color: #1E1E1E;
-                border: none;
-            }
-            QListWidget::item {
-                padding: 12px;
-                border-bottom: 1px solid #333333;
-            }
-            QListWidget::item:hover {
-                background-color: #2D2D2D;
-            }
-        """)
-        chapter_layout.addWidget(self.chapter_list)
+        # Create chapters container
+        self.chapters_container = QWidget()
+        self.chapters_layout = QVBoxLayout(self.chapters_container)
+        self.chapters_layout.setContentsMargins(0, 0, 0, 0)
+        self.chapters_layout.setSpacing(1)  # Small spacing between chapters
         
+        chapter_layout.addWidget(self.chapters_container)
         parent_layout.addWidget(chapter_container)
     
     def _load_cover_image(self):
@@ -334,16 +392,29 @@ class MangaDetailWindow(QWidget):
         # Update chapter count
         self.chapter_count.setText(f"Chapters: {len(self.manga.chapters)}")
         
-        # Clear and update chapter list
-        self.chapter_list.clear()
+        # Clear existing chapters
+        while self.chapters_layout.count():
+            child = self.chapters_layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
         
         # Add chapters in reverse order (newest first)
         for chapter in sorted(self.manga.chapters, key=lambda x: x.number, reverse=True):
-            item = QListWidgetItem()
-            widget = ChapterListItem(chapter)
-            item.setSizeHint(widget.sizeHint())
-            self.chapter_list.addItem(item)
-            self.chapter_list.setItemWidget(item, widget)
+            chapter_item = ChapterListItem(chapter)
+            chapter_item.setStyleSheet("""
+                QWidget {
+                    background-color: #1E1E1E;
+                    border-bottom: 1px solid #333333;
+                    padding: 12px;
+                }
+                QWidget:hover {
+                    background-color: #2D2D2D;
+                }
+            """)
+            self.chapters_layout.addWidget(chapter_item)
+        
+        # Add stretch at the end to push all items to the top
+        self.chapters_layout.addStretch()
     
     def _show_loading_error(self):
         self.chapter_count.setText("Error loading chapters")
@@ -388,6 +459,10 @@ class MangaDetailWindow(QWidget):
             
             QListWidget::item:hover {
                 background-color: #2D2D2D;
+            }
+            
+            QScrollArea {
+                border: none;
             }
             
             QScrollBar:vertical {

@@ -1,13 +1,14 @@
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                             QPushButton, QLabel, QScrollArea, QFrame, QListWidget,
-                            QListWidgetItem, QMenuBar, QProgressBar)
+                            QListWidgetItem, QMenuBar, QProgressBar, QMessageBox)
 from PyQt6.QtCore import Qt, QObject, pyqtSignal
-from PyQt6.QtGui import QPixmap
+from PyQt6.QtGui import QPixmap, QIcon
 import requests
 from io import BytesIO
 import logging
 import threading
 from ..web_parser import RawKumaParser
+from ..manga_translator_service import MangaTranslatorService
 
 logger = logging.getLogger(__name__)
 
@@ -25,8 +26,14 @@ class MangaDetailsLoader(QObject):
             self.error.emit(str(e))
 
 class ChapterListItem(QWidget):
-    def __init__(self, chapter, parent=None):
+    def __init__(self, chapter, manga_url, parent=None):
         super().__init__(parent)
+        self.chapter = chapter
+        self.manga_url = manga_url
+        self.is_translating = False
+        self.is_downloaded = False
+        self.is_translated = False
+        
         layout = QHBoxLayout(self)
         layout.setContentsMargins(16, 8, 16, 8)
         
@@ -45,7 +52,7 @@ class ChapterListItem(QWidget):
         """)
         info_container.addWidget(title)
         
-         # Date if available
+        # Date if available
         if chapter.date:
             date = QLabel(chapter.date.strftime('%Y-%m-%d'))
             date.setStyleSheet("""
@@ -56,34 +63,76 @@ class ChapterListItem(QWidget):
             """)
             info_container.addWidget(date)
         
-        layout.addLayout(info_container)
+        # Create widget for info container
+        info_widget = QWidget()
+        info_widget.setLayout(info_container)
+        layout.addWidget(info_widget)
         
-        # Progress bar
-        progress_bar = QProgressBar()
-        progress_bar.setFixedHeight(8)
-        progress_bar.setValue(0)
-        progress_bar.setTextVisible(False)
-        progress_bar.setStyleSheet("""
+        # Create progress bars and buttons first
+        self.setup_progress_bars()
+        self.setup_buttons()
+        
+        # Then create translator service and connect signals
+        self.translator = MangaTranslatorService()
+        self.connect_signals()
+    
+    def setup_progress_bars(self):
+        # Progress bars container
+        progress_container = QVBoxLayout()
+        progress_container.setSpacing(4)
+        
+        # Download progress bar
+        self.download_progress = QProgressBar()
+        self.download_progress.setFixedHeight(6)
+        self.download_progress.setTextVisible(False)
+        self.download_progress.setStyleSheet("""
             QProgressBar {
                 background-color: #424242;
                 border: none;
-                border-radius: 4px;
+                border-radius: 3px;
             }
             QProgressBar::chunk {
                 background-color: #2196F3;
-                border-radius: 4px;
+                border-radius: 3px;
             }
         """)
-        layout.addWidget(progress_bar)
+        # Set initial value based on download status
+        self.download_progress.setValue(100 if self.is_downloaded else 0)
+        progress_container.addWidget(self.download_progress)
         
-        # Right side with button
+        # Translation progress bar
+        self.translate_progress = QProgressBar()
+        self.translate_progress.setFixedHeight(6)
+        self.translate_progress.setTextVisible(False)
+        self.translate_progress.setStyleSheet("""
+            QProgressBar {
+                background-color: #424242;
+                border: none;
+                border-radius: 3px;
+            }
+            QProgressBar::chunk {
+                background-color: #4CAF50;
+                border-radius: 3px;
+            }
+        """)
+        # Set initial value based on translation status
+        self.translate_progress.setValue(100 if self.is_translated else 0)
+        progress_container.addWidget(self.translate_progress)
+        
+        # Create widget for progress container
+        progress_widget = QWidget()
+        progress_widget.setLayout(progress_container)
+        self.layout().addWidget(progress_widget)
+    
+    def setup_buttons(self):
+        # Right side with buttons
         right_container = QHBoxLayout()
-        right_container.setSpacing(16)
+        right_container.setSpacing(8)
         
         # Translate button
-        translate_btn = QPushButton("Translate")
-        translate_btn.setFixedWidth(100)
-        translate_btn.setStyleSheet("""
+        self.translate_btn = QPushButton("Translate")
+        self.translate_btn.setFixedWidth(100)
+        self.translate_btn.setStyleSheet("""
             QPushButton {
                 background-color: #2196F3;
                 color: white;
@@ -95,10 +144,83 @@ class ChapterListItem(QWidget):
             QPushButton:hover {
                 background-color: #1E88E5;
             }
+            QPushButton:disabled {
+                background-color: #424242;
+                color: #808080;
+            }
         """)
-        right_container.addWidget(translate_btn)
+        self.translate_btn.clicked.connect(self.start_translation)
+        right_container.addWidget(self.translate_btn)
         
-        layout.addLayout(right_container)
+        # Stop button
+        self.stop_btn = QPushButton("⬛")
+        self.stop_btn.setFixedSize(32, 32)
+        self.stop_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #424242;
+                border: none;
+                border-radius: 16px;
+                padding: 4px;
+                color: white;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                background-color: #FF5252;
+            }
+        """)
+        self.stop_btn.clicked.connect(self.stop_translation)
+        self.stop_btn.hide()
+        right_container.addWidget(self.stop_btn)
+        
+        # Create widget for right container
+        right_widget = QWidget()
+        right_widget.setLayout(right_container)
+        self.layout().addWidget(right_widget)
+    
+    def connect_signals(self):
+        self.translator.download_progress.connect(self.update_download_progress)
+        self.translator.translation_progress.connect(self.update_translation_progress)
+        self.translator.translation_completed.connect(self.on_translation_completed)
+        self.translator.translation_error.connect(self.on_translation_error)
+    
+    def update_download_progress(self, value):
+        self.download_progress.setValue(int(value))
+    
+    def update_translation_progress(self, value):
+        self.translate_progress.setValue(int(value))
+    
+    def start_translation(self):
+        self.is_translating = True
+        self.translate_btn.setEnabled(False)
+        self.stop_btn.show()
+        
+        # Start translation in background
+        threading.Thread(
+            target=self.translator.start_translation,
+            args=(self.chapter, self.manga_url),
+            daemon=True
+        ).start()
+    
+    def stop_translation(self):
+        self.is_translating = False
+        self.translate_btn.setEnabled(True)
+        self.stop_btn.hide()
+        self.download_progress.setValue(0)
+        self.translate_progress.setValue(0)
+    
+    def on_translation_completed(self, path):
+        self.is_translating = False
+        self.translate_btn.setEnabled(True)
+        self.stop_btn.hide()
+        QMessageBox.information(self, "Success", f"Translation completed: {path}")
+    
+    def on_translation_error(self, error_msg):
+        self.is_translating = False
+        self.translate_btn.setEnabled(True)
+        self.stop_btn.hide()
+        self.download_progress.setValue(0)
+        self.translate_progress.setValue(0)
+        QMessageBox.warning(self, "Error", f"Translation failed: {error_msg}")
 
 class MangaDetailWindow(QWidget):
     image_loaded = pyqtSignal(QPixmap)  # Signal for image loading
@@ -107,6 +229,9 @@ class MangaDetailWindow(QWidget):
         super().__init__(parent)
         self.parent = parent
         self.manga = manga  # Set manga first
+        
+        # Create translator service
+        self.translator = MangaTranslatorService()
         
         # Create details loader
         self.details_loader = MangaDetailsLoader()
@@ -141,6 +266,7 @@ class MangaDetailWindow(QWidget):
         
         # Update title labels
         self.title_label.setText(manga.title)
+        self.manga_title.setText(manga.title)
         
         # Update content section
         stars = int(manga.rating * 5 / 10)
@@ -382,6 +508,10 @@ class MangaDetailWindow(QWidget):
         
         # Update UI
         self._update_ui_with_details()
+
+    def get_manga_id(self):
+        url = self.manga.url.rstrip('/')  # Remove trailing slash if present
+        return url.split('/')[-1]
     
     def _on_load_error(self, error_msg):
         """Handle error in main thread"""
@@ -400,7 +530,7 @@ class MangaDetailWindow(QWidget):
         
         # Add chapters in reverse order (newest first)
         for chapter in sorted(self.manga.chapters, key=lambda x: x.number, reverse=True):
-            chapter_item = ChapterListItem(chapter)
+            chapter_item = ChapterListItem(chapter, self.manga.url)
             chapter_item.setStyleSheet("""
                 QWidget {
                     background-color: #1E1E1E;
@@ -411,6 +541,8 @@ class MangaDetailWindow(QWidget):
                     background-color: #2D2D2D;
                 }
             """)
+            chapter_item.is_downloaded = self.translator.is_downloaded(chapter, self.manga.url)
+            chapter_item.is_translated = self.translator.is_translated(chapter, self.manga.url) 
             self.chapters_layout.addWidget(chapter_item)
         
         # Add stretch at the end to push all items to the top
@@ -489,3 +621,29 @@ class MangaDetailWindow(QWidget):
                 background-color: #1E1E1E;
             }
         """)
+    
+    def start_translation(self):
+        for chapter_item in self.chapters_layout:
+            if chapter_item.is_translating:
+                chapter_item.start_translation()
+    
+    def stop_translation(self):
+        for chapter_item in self.chapters_layout:
+            chapter_item.stop_translation()
+    
+    def update_download_progress(self, value):
+        for chapter_item in self.chapters_layout:
+            chapter_item.update_download_progress(value)
+    
+    def update_translation_progress(self, value):
+        for chapter_item in self.chapters_layout:
+            chapter_item.update_translation_progress(value)
+    
+    def on_translation_completed(self, path):
+        for chapter_item in self.chapters_layout:
+            chapter_item.on_translation_completed(path)
+    
+    def on_translation_error(self, error_msg):
+        for chapter_item in self.chapters_layout:
+            chapter_item.on_translation_error(error_msg)
+

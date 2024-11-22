@@ -2,8 +2,8 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                             QLineEdit, QPushButton, QScrollArea, QGridLayout,
                             QLabel, QMenuBar, QMenu, QMessageBox, QFrame, 
                             QDialog, QStackedWidget)
-from PyQt6.QtCore import Qt, pyqtSignal, QObject, QTimer
-from PyQt6.QtGui import QPixmap, QPalette, QColor
+from PyQt6.QtCore import Qt, pyqtSignal, QObject, QTimer, QUrl
+from PyQt6.QtGui import QPixmap, QPalette, QColor, QDesktopServices
 import logging
 import threading
 from PIL import Image
@@ -235,6 +235,10 @@ class MainWindow(QMainWindow):
         
         about_menu = menubar.addMenu("About")
         about_menu.addAction("About", self.show_about)
+        
+        # Add Help menu
+        help_menu = menubar.addMenu("Help")
+        help_menu.addAction("Contact Support", self.show_help)
         
         # Create central widget and main layout
         central_widget = QWidget()
@@ -481,3 +485,45 @@ class MainWindow(QMainWindow):
             child = self.grid_layout.takeAt(0)
             if child.widget():
                 child.widget().deleteLater()
+    
+    def show_help(self):
+        help_dialog = QMessageBox(self)
+        help_dialog.setWindowTitle("Contact Support")
+        help_dialog.setIcon(QMessageBox.Icon.Information)
+        
+        help_text = """
+        Report any issues such as bugs, parser errors, empty manga listings, problems opening manga details, or download failures.
+
+        Please include screenshots if possible to help diagnose the problem.
+        """
+        
+        # Create custom widget for message box
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        
+        # Add message text
+        message_label = QLabel(help_text)
+        message_label.setWordWrap(True)
+        layout.addWidget(message_label)
+        
+        # Add Telegram button
+        telegram_btn = QPushButton("Contact me via Telegram")
+        telegram_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2AABEE;
+                color: white;
+                border: none;
+                padding: 10px 20px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #229ED9;
+            }
+        """)
+        telegram_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://t.me/hayinukman")))
+        layout.addWidget(telegram_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+        
+        # Set custom widget as message box layout
+        help_dialog.layout().addWidget(widget, 1, 1)
+        help_dialog.exec()

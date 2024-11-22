@@ -14,16 +14,17 @@ def extract_archive(archive_path, extract_dir):
         zip_ref.extractall(extract_subdir)
     return archive_name
 
-def run_translation(input_path, language="ENG", translator="sugoi", format="jpg", use_gpu=True, skip_no_text=True, colorizer="mc2"):
+def run_translation(input_path, output_path=None, language="ENG", translator="sugoi", format="jpg", use_gpu=False, skip_no_text=True, colorizer="mc2"):
     """
     Run translation on a given input path
     
     Args:
         input_path (str): Path to the directory to translate
+        output_path (str): Path to the output directory (default: None)
         language (str): Target language code (default: "ENG")
         translator (str): Translator to use (default: "sugoi")
         format (str): Output format (default: "jpg")
-        use_gpu (bool): Whether to use GPU acceleration (default: True)
+        use_gpu (bool): Whether to use GPU acceleration (default: False)
         skip_no_text (bool): Whether to skip images with no text (default: True)
         colorizer (str): Colorizer to use (default: "mc2")
     
@@ -35,11 +36,14 @@ def run_translation(input_path, language="ENG", translator="sugoi", format="jpg"
         "python -m manga_translator",
         "-v",
         "--mode batch",
-        f"--translator={translator}",
+        f"--translator {translator}",
         f"-l {language}",
         f"-i {input_path}",
         f"--format {format}"
     ]
+    
+    if output_path:
+        cmd.append(f"--dest {output_path}")
     
     if use_gpu:
         cmd.append("--use-gpu")
@@ -52,12 +56,13 @@ def run_translation(input_path, language="ENG", translator="sugoi", format="jpg"
     process = subprocess.run(" ".join(cmd), shell=True, capture_output=True, text=True)
     return process.stdout, process.stderr
 
-def run_single_translation(input_path, language="ENG", translator="sugoi", format="jpg", use_gpu=True, skip_no_text=True, colorizer="mc2"):
+def run_single_translation(input_file, output_path, language="ENG", translator="sugoi", format="jpg", use_gpu=True, skip_no_text=True, colorizer="mc2"):
     """
     Run translation on a single image file
     
     Args:
-        input_path (str): Path to the image file to translate
+        input_file (str): Path to the image file to translate
+        output_path (str): Path to the output directory
         language (str): Target language code (default: "ENG")
         translator (str): Translator to use (default: "sugoi")
         format (str): Output format (default: "jpg")
@@ -69,8 +74,8 @@ def run_single_translation(input_path, language="ENG", translator="sugoi", forma
         tuple: (stdout, stderr) from the translation process
     """
     # Create output directory by adding "-translated" suffix
-    input_dir = os.path.dirname(input_path)
-    output_dir = input_dir + "-translated"
+    
+    output_dir = output_path
     os.makedirs(output_dir, exist_ok=True)
     
     # Build command with all parameters
@@ -80,7 +85,7 @@ def run_single_translation(input_path, language="ENG", translator="sugoi", forma
         "--mode demo",
         f"--translator={translator}",
         f"-l {language}",
-        f"-i {input_path}",
+        f"-i {input_file}",
         f"--dest {output_dir}",
         f"--format {format}"
     ]

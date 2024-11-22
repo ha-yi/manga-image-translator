@@ -102,9 +102,6 @@ class RawKumaParser:
         logger.info(f"Fetching manga details from: {url}")
         response = requests.get(url)
         soup = BeautifulSoup(response.text, 'html.parser')
-        chapterContainer = soup.find(id="chapterlist")
-        chapterList = chapterContainer.find('ul')
-        print(chapterList)
         
         # Get manga details first
         description = ""
@@ -130,27 +127,18 @@ class RawKumaParser:
         chapter_items = soup.select('#chapterlist ul li')  # Changed selector
         logger.info(f"Found {len(chapter_items)} potential chapters")
         
-        if not chapter_items:
-            # Try alternative selector
-            chapter_items = soup.select('.eplister ul.clstyle li')
-            logger.info(f"Trying alternative selector, found {len(chapter_items)} chapters")
-        
-        if not chapter_items:
-            logger.warning("Chapter list element not found, trying another selector")
-            # Try one more alternative
-            chapter_items = soup.select('.bixbox ul li')
-            logger.info(f"Trying final selector, found {len(chapter_items)} chapters")
-        
         for chapter in chapter_items:
             try:
-                # Get chapter link and number
-                chapter_link = chapter.select_one('a')
-                if not chapter_link:
+                # Get chapter link and title from eph-num
+                eph_num = chapter.select_one('.eph-num a')
+                if not eph_num:
                     continue
                 
-                # Get chapter title
-                chapter_num = chapter.select_one('.chapternum')
-                title = chapter_num.text.strip() if chapter_num else chapter_link.text.strip()
+                chapter_url = eph_num.get('href', '')
+                
+                # Get chapter number
+                chapter_num_span = eph_num.select_one('.chapternum')
+                title = chapter_num_span.text.strip() if chapter_num_span else eph_num.text.strip()
                 
                 # Extract chapter number from title
                 number_match = re.search(r'Chapter (\d+(?:\.\d+)?)', title)
@@ -159,12 +147,9 @@ class RawKumaParser:
                     number_match = re.search(r'(\d+(?:\.\d+)?)', title)
                 number = float(number_match.group(1)) if number_match else 0.0
                 
-                # Get chapter URL
-                chapter_url = chapter_link.get('href', '')
-                
                 # Get chapter date
-                date_element = chapter.select_one('.chapterdate')
-                date_str = date_element.text.strip() if date_element else ''
+                date_span = eph_num.select_one('.chapterdate')
+                date_str = date_span.text.strip() if date_span else ''
                 try:
                     date = datetime.strptime(date_str, '%B %d, %Y') if date_str else None
                 except ValueError:
@@ -175,13 +160,21 @@ class RawKumaParser:
                         logger.warning(f"Could not parse date: {date_str}")
                         date = None
                 
+                # Get download URL from dload class
+                download_url = ""
+                dload_link = chapter.select_one('a.dload')
+                if dload_link:
+                    download_url = dload_link.get('href', '')
+                    logger.info(f"Found download URL for chapter {number}: {download_url}")
+                
                 logger.info(f"Processing chapter: {title} ({chapter_url})")
                 
                 chapter_obj = Chapter(
                     title=title,
                     url=chapter_url,
                     number=number,
-                    date=date
+                    date=date,
+                    download_url=download_url
                 )
                 chapters.append(chapter_obj)
                 logger.info(f"Successfully parsed chapter: {title}")

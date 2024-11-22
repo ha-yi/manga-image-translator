@@ -1,7 +1,8 @@
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                             QLineEdit, QPushButton, QScrollArea, QGridLayout,
-                            QLabel, QMenuBar, QMenu, QMessageBox, QFrame, QDialog)
-from PyQt6.QtCore import Qt, pyqtSignal, QObject
+                            QLabel, QMenuBar, QMenu, QMessageBox, QFrame, 
+                            QDialog, QStackedWidget)
+from PyQt6.QtCore import Qt, pyqtSignal, QObject, QTimer
 from PyQt6.QtGui import QPixmap, QPalette, QColor
 import logging
 import threading
@@ -16,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 class MangaCard(QFrame):
     clicked = pyqtSignal(object)
+    image_loaded = pyqtSignal(QPixmap)
     
     def __init__(self, manga, parent=None):
         super().__init__(parent)
@@ -98,6 +100,9 @@ class MangaCard(QFrame):
         # Add bottom container to overlay
         overlay_layout.addWidget(bottom_container)
         
+        # Connect image loaded signal
+        self.image_loaded.connect(self._on_image_loaded)
+        
         # Load image in background
         threading.Thread(target=self._load_cover_image, daemon=True).start()
     
@@ -123,12 +128,17 @@ class MangaCard(QFrame):
                 y = (scaled_pixmap.height() - 200) // 2 if scaled_pixmap.height() > 200 else 0
                 scaled_pixmap = scaled_pixmap.copy(x, y, 150, 200)
             
-            # Update image in main thread
-            self.image_label.setPixmap(scaled_pixmap)
+            # Emit signal with pixmap
+            self.image_loaded.emit(scaled_pixmap)
             
         except Exception as e:
             logger.error(f"Error loading image for {self.manga.title}: {e}")
+            # Use invokeMethod to update UI from another thread
             self.image_label.setText("Image\nNot Available")
+    
+    def _on_image_loaded(self, pixmap):
+        """Update image in the main thread"""
+        self.image_label.setPixmap(pixmap)
     
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -201,14 +211,18 @@ class MainWindow(QMainWindow):
         self.current_page = 1
         self.has_previous = False
         self.next_url = None
+        self.current_manga_list = []
+        
+        # Create resize timer for debouncing
+        self.resize_timer = QTimer()
+        self.resize_timer.setSingleShot(True)
+        self.resize_timer.setInterval(150)
+        self.resize_timer.timeout.connect(self._handle_resize)
         
         # Create manga loader
         self.manga_loader = MangaLoader()
         self.manga_loader.finished.connect(self._on_manga_loaded)
         self.manga_loader.error.connect(self._on_load_error)
-        
-        # Create loading dialog
-        self.loading_dialog = None
         
         self.setup_ui()
         self.load_manga_page(1)
@@ -238,13 +252,21 @@ class MainWindow(QMainWindow):
         search_layout.addWidget(self.search_button)
         main_layout.addLayout(search_layout)
         
+        # Create stacked widget for navigation
+        self.stacked_widget = QStackedWidget()
+        main_layout.addWidget(self.stacked_widget)
+        
+        # Create manga grid page
+        self.grid_page = QWidget()
+        grid_layout = QVBoxLayout(self.grid_page)
+        
         # Manga grid
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.grid_widget = QWidget()
         self.grid_layout = QGridLayout(self.grid_widget)
         self.scroll_area.setWidget(self.grid_widget)
-        main_layout.addWidget(self.scroll_area)
+        grid_layout.addWidget(self.scroll_area)
         
         # Navigation buttons
         nav_layout = QHBoxLayout()
@@ -258,7 +280,13 @@ class MainWindow(QMainWindow):
         
         nav_layout.addWidget(self.prev_button)
         nav_layout.addWidget(self.next_button)
-        main_layout.addLayout(nav_layout)
+        grid_layout.addLayout(nav_layout)
+        
+        # Add grid page to stacked widget
+        self.stacked_widget.addWidget(self.grid_page)
+        
+        # Create manga detail page (will be added when needed)
+        self.detail_page = None
     
     def show_about(self):
         QMessageBox.about(self, "About", 
@@ -353,29 +381,95 @@ class MainWindow(QMainWindow):
         if self.next_url:
             self.load_manga_page(self.current_page + 1, self.next_url)
     
-    def display_manga_list(self, manga_list):
-        # Clear existing grid
-        while self.grid_layout.count():
-            child = self.grid_layout.takeAt(0)
-            if child.widget():
-                child.widget().deleteLater()
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Restart the timer on each resize event
+        self.resize_timer.start()
+    
+    def _handle_resize(self):
+        # Only redisplay if we have manga to show
+        if self.current_manga_list:
+            self.display_manga_list(self.current_manga_list)
+    
+    def calculate_grid_layout(self):
+        # Get available width
+        available_width = self.scroll_area.viewport().width()
         
-        # Calculate grid columns based on window width
-        grid_width = 170  # Card width + padding
-        columns = max(1, self.width() // grid_width)
+        # Card width plus margins
+        card_width = 150  # Base card width
+        horizontal_margin = 10  # Margin on each side
+        total_card_width = card_width + (horizontal_margin * 2)
+        
+        # Calculate number of columns that can fit
+        columns = max(1, (available_width - horizontal_margin) // total_card_width)
+        
+        # Calculate spacing to distribute remaining width evenly
+        total_used_width = columns * total_card_width
+        remaining_width = available_width - total_used_width - horizontal_margin
+        spacing = max(horizontal_margin, horizontal_margin + (remaining_width // (columns + 1)))
+        
+        return columns, spacing
+    
+    def display_manga_list(self, manga_list):
+        # Store current list for resize events
+        self.current_manga_list = manga_list
+        
+        # Clear existing grid
+        self.clear_grid()
+        
+        # Calculate layout
+        columns, spacing = self.calculate_grid_layout()
+        
+        # Configure grid layout
+        self.grid_layout.setSpacing(spacing)
+        self.grid_layout.setContentsMargins(spacing, spacing, spacing, spacing)
         
         # Add manga cards to grid
         for i, manga in enumerate(manga_list):
             row = i // columns
             col = i % columns
             
+            # Create and add manga card directly
             card = MangaCard(manga)
             card.clicked.connect(self.show_manga_detail)
-            self.grid_layout.addWidget(card, row, col)
+            self.grid_layout.addWidget(card, row, col, Qt.AlignmentFlag.AlignCenter)
+        
+        # Add stretch to bottom row
+        bottom_row = (len(manga_list) + columns - 1) // columns
+        self.grid_layout.setRowStretch(bottom_row, 1)
     
     def show_manga_detail(self, manga):
-        # TODO: Implement manga detail view
-        print(f"Showing details for: {manga.title}")
+        from .manga_detail import MangaDetailWindow
+        
+        # Create detail page if it doesn't exist
+        if self.detail_page is None:
+            self.detail_page = MangaDetailWindow(self, manga)
+            self.stacked_widget.addWidget(self.detail_page)
+        else:
+            # Update existing detail page with new manga
+            self.detail_page.update_manga(manga)
+        
+        # Switch to detail page
+        self.stacked_widget.setCurrentWidget(self.detail_page)
+    
+    def show_main_view(self):
+        # Switch back to grid page
+        self.stacked_widget.setCurrentWidget(self.grid_page)
+        
+        # Redisplay current manga list if needed
+        if self.current_manga_list:
+            self.display_manga_list(self.current_manga_list)
+            
+            # Restore button states
+            if self.has_previous:
+                self.prev_button.show()
+            else:
+                self.prev_button.hide()
+                
+            if self.next_url:
+                self.next_button.show()
+            else:
+                self.next_button.hide()
     
     def clear_grid(self):
         while self.grid_layout.count():

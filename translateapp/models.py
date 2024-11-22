@@ -9,6 +9,9 @@ class Chapter:
     number: float
     download_url: str = ""
     date: Optional[datetime] = None
+    manga_title: str = ""
+    manga_id: str = ""
+    manga_cover: str = ""
 
 @dataclass
 class Manga:

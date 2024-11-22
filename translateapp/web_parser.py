@@ -98,9 +98,9 @@ class RawKumaParser:
         return mangas, next_page_url
     
     @staticmethod
-    def parse_manga_details(url):
-        logger.info(f"Fetching manga details from: {url}")
-        response = requests.get(url)
+    def parse_manga_details(manga: Manga):
+        logger.info(f"Fetching manga details from: {manga.url}")
+        response = requests.get(manga.url)
         soup = BeautifulSoup(response.text, 'html.parser')
         
         # Get manga details first
@@ -169,12 +169,19 @@ class RawKumaParser:
                 
                 logger.info(f"Processing chapter: {title} ({chapter_url})")
                 
+                # Get manga ID from URL
+                manga_id = manga.url.rstrip('/').split('/')[-1]
+                
                 chapter_obj = Chapter(
                     title=title,
                     url=chapter_url,
                     number=number,
                     date=date,
-                    download_url=download_url
+                    download_url=download_url,
+                    # Add manga information
+                    manga_title=manga.title,
+                    manga_id=manga_id,
+                    manga_cover=manga.cover_image
                 )
                 chapters.append(chapter_obj)
                 logger.info(f"Successfully parsed chapter: {title}")

@@ -22,6 +22,7 @@ class MangaCard(QFrame):
     def __init__(self, manga, parent=None):
         super().__init__(parent)
         self.manga = manga
+        self._destroyed = False
         self.setFixedSize(150, 200)
         self.setStyleSheet("""
             QFrame {
@@ -103,13 +104,25 @@ class MangaCard(QFrame):
         # Connect image loaded signal
         self.image_loaded.connect(self._on_image_loaded)
         
+        # Connect destroyed signal
+        self.destroyed.connect(self._on_destroyed)
+        
         # Load image in background
         threading.Thread(target=self._load_cover_image, daemon=True).start()
     
+    def _on_destroyed(self):
+        self._destroyed = True
+    
     def _load_cover_image(self):
         try:
+            if self._destroyed:
+                return
+                
             response = requests.get(self.manga.cover_image)
             img_data = response.content
+            
+            if self._destroyed:
+                return
             
             # Create QPixmap directly from image data
             pixmap = QPixmap()
@@ -128,17 +141,18 @@ class MangaCard(QFrame):
                 y = (scaled_pixmap.height() - 200) // 2 if scaled_pixmap.height() > 200 else 0
                 scaled_pixmap = scaled_pixmap.copy(x, y, 150, 200)
             
-            # Emit signal with pixmap
-            self.image_loaded.emit(scaled_pixmap)
+            if not self._destroyed:
+                self.image_loaded.emit(scaled_pixmap)
             
         except Exception as e:
             logger.error(f"Error loading image for {self.manga.title}: {e}")
-            # Use invokeMethod to update UI from another thread
-            self.image_label.setText("Image\nNot Available")
+            if not self._destroyed:
+                self.image_label.setText("Image\nNot Available")
     
     def _on_image_loaded(self, pixmap):
         """Update image in the main thread"""
-        self.image_label.setPixmap(pixmap)
+        if not self._destroyed:
+            self.image_label.setPixmap(pixmap)
     
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -231,14 +245,23 @@ class MainWindow(QMainWindow):
         # Setup menubar
         menubar = self.menuBar()
         file_menu = menubar.addMenu("File")
+        
+        # Add Translate Local Directories action
+        translate_local_action = file_menu.addAction("Translate Local Directories")
+        translate_local_action.triggered.connect(self.show_local_manga_dialog)
+        
+        file_menu.addSeparator()
         file_menu.addAction("Exit", self.close)
         
         about_menu = menubar.addMenu("About")
         about_menu.addAction("About", self.show_about)
         
-        # Add Help menu
         help_menu = menubar.addMenu("Help")
         help_menu.addAction("Contact Support", self.show_help)
+        
+        # Add Queue Manager menu at right
+        queue_menu = menubar.addMenu("Queue Manager")
+        queue_menu.addAction("Show Queue", self.show_queue_manager)
         
         # Create central widget and main layout
         central_widget = QWidget()
@@ -527,3 +550,13 @@ class MainWindow(QMainWindow):
         # Set custom widget as message box layout
         help_dialog.layout().addWidget(widget, 1, 1)
         help_dialog.exec()
+    
+    def show_queue_manager(self):
+        from .queue_manager import QueueManagerDialog
+        dialog = QueueManagerDialog(self)
+        dialog.exec()
+    
+    def show_local_manga_dialog(self):
+        from .local_manga_dialog import LocalMangaDialog
+        dialog = LocalMangaDialog(self)
+        dialog.exec()

@@ -9,10 +9,35 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from .models import Chapter
 from runindir import run_translation
 import threading
+from queue import Queue, Empty
+from dataclasses import dataclass
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
+@dataclass
+class TranslationTask:
+    chapter: Chapter
+    manga_url: str
+
+@dataclass
+class QueueStatus:
+    current_task: TranslationTask = None
+    current_progress: float = 0
+    tasks_remaining: int = 0
+    queued_chapters: list = None
+
+@dataclass
+class CompletedTranslation:
+    chapter: Chapter
+    completed_at: datetime
+    path: str
+
 class MangaTranslatorService(QObject):
+    # Singleton instance
+    _instance = None
+    _lock = threading.Lock()
+    
     # Signals for download progress and completion
     download_progress = pyqtSignal(float)  # Progress percentage (0-100)
     download_completed = pyqtSignal(str)   # Path to downloaded directory
@@ -23,12 +48,52 @@ class MangaTranslatorService(QObject):
     translation_completed = pyqtSignal(str)   # Path to translated directory
     translation_error = pyqtSignal(str)       # Error message
     
+    # Queue status signals
+    queue_status_changed = pyqtSignal(QueueStatus)  # Signal for queue updates
+    
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super(MangaTranslatorService, cls).__new__(cls)
+                    # Initialize the singleton instance
+                    cls._instance._initialized = False
+        return cls._instance
+    
     def __init__(self):
+        # Only initialize once
+        if self._initialized:
+            return
+            
         super().__init__()
         # Get user's documents directory
         self.base_dir = os.path.join(Path.home(), "Documents", "rawkuma")
         # Create directory if it doesn't exist
         os.makedirs(self.base_dir, exist_ok=True)
+        
+        # Translation queue
+        self.translation_queue = Queue()
+        self.is_processing = False
+        self.current_task = None
+        self._queue_lock = threading.Lock()
+        
+        # Queue status
+        self.queue_status = QueueStatus(
+            queued_chapters=[]
+        )
+        
+        # Add completed translations list
+        self.completed_translations = []
+        
+        # Mark as initialized
+        self._initialized = True
+    
+    @classmethod
+    def get_instance(cls):
+        """Get the singleton instance"""
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
     
     def get_manga_id(self, url: str) -> str:
         """Extract manga ID from URL"""
@@ -81,7 +146,19 @@ class MangaTranslatorService(QObject):
             
             # Download file
             if chapter.download_url:
-                response = requests.get(chapter.download_url, stream=True)
+                # Use session to handle redirects
+                session = requests.Session()
+                response = session.get(
+                    chapter.download_url, 
+                    stream=True,
+                    allow_redirects=True  # Explicitly allow redirects
+                )
+                
+                # Log response content type and size
+                content_type = response.headers.get('content-type', 'unknown')
+                content_size = response.headers.get('content-length', 'unknown')
+                logger.info(f"Response content type: {content_type}, size: {content_size} bytes")
+                
                 response.raise_for_status()
                 
                 # Get filename from URL or use default
@@ -127,12 +204,55 @@ class MangaTranslatorService(QObject):
             return False
     
     def start_translation(self, chapter: Chapter, manga_url: str):
-        """
-        Start translating chapter in background
-        Args:
-            chapter: Chapter object to translate
-            manga_url: URL of the manga (for ID extraction)
-        """
+        """Add translation task to queue and start processing if not already running"""
+        task = TranslationTask(chapter, manga_url)
+        
+        with self._queue_lock:
+            self.translation_queue.put(task)
+            if not self.is_processing:
+                self.is_processing = True
+                threading.Thread(target=self._process_queue, daemon=True).start()
+        
+        # Emit updated queue status
+        self._emit_queue_status()
+    
+    def _process_queue(self):
+        """Process translation tasks from queue"""
+        while True:
+            try:
+                # Get next task from queue
+                task = self.translation_queue.get(block=False)
+                self.current_task = task
+                
+                # Update and emit queue status
+                self._emit_queue_status()
+                
+                # Process the task
+                self._translate_chapter(task.chapter, task.manga_url)
+                
+                # Mark task as done
+                self.translation_queue.task_done()
+                self.current_task = None
+                self.queue_status.current_progress = 0
+                
+                # Emit updated queue status
+                self._emit_queue_status()
+                
+            except Empty:
+                # Queue is empty, stop processing
+                self.is_processing = False
+                self.current_task = None
+                self.queue_status.current_progress = 0
+                self._emit_queue_status()
+                break
+            except Exception as e:
+                logger.error(f"Error processing translation queue: {e}")
+                self.translation_error.emit(str(e))
+                # Continue with next task
+                continue
+    
+    def _translate_chapter(self, chapter: Chapter, manga_url: str):
+        """Internal method to handle actual translation process"""
         try:
             manga_id = self.get_manga_id(manga_url)
             manga_dir = os.path.join(self.base_dir, manga_id)
@@ -174,7 +294,7 @@ class MangaTranslatorService(QObject):
             # Step 3: Create translated directory
             os.makedirs(translated_dir, exist_ok=True)
             
-            # Get list of image files in chapter directory
+            # Get list of image files
             chapter_files = [f for f in os.listdir(chapter_dir) 
                            if f.lower().endswith(('.jpg', '.png', '.jpeg'))]
             total_files = len(chapter_files)
@@ -191,13 +311,13 @@ class MangaTranslatorService(QObject):
             )
             monitor_thread.start()
             
-            # Run translation in main thread
+            # Run translation
             from runindir import run_translation
-            logger.info("Starting translation...")
+            logger.info(f"Starting translation for chapter {chapter.number}...")
             run_translation(chapter_dir, translated_dir)
             logger.info("Translation completed")
             
-            # Signal monitor thread to stop
+            # Stop monitoring
             self.translation_running = False
             monitor_thread.join()
             
@@ -207,6 +327,13 @@ class MangaTranslatorService(QObject):
             if len(translated_files) != total_files:
                 raise Exception("Not all files were translated")
             
+            # After successful translation, add to completed list
+            self.completed_translations.append(CompletedTranslation(
+                chapter=chapter,
+                completed_at=datetime.now(),
+                path=translated_dir
+            ))
+            
             # Emit completion signal
             self.translation_completed.emit(translated_dir)
             
@@ -214,7 +341,7 @@ class MangaTranslatorService(QObject):
             logger.error(f"Error translating chapter {chapter.number}: {e}")
             self.translation_error.emit(str(e))
             self.translation_running = False
-
+    
     def _monitor_translation_progress(self, chapter_dir: str, translated_dir: str, total_files: int):
         """Monitor translation progress by checking translated directory"""
         while self.translation_running:
@@ -224,14 +351,18 @@ class MangaTranslatorService(QObject):
                                  if f.lower().endswith(('.jpg', '.png', '.jpeg'))]
                 translated_count = len(translated_files)
                 
-                # Calculate progress first
+                # Calculate progress
                 progress = (translated_count / total_files) * 100
                 
-                # Now we can use progress in logging
-                logger.info(f"Translation progress: {translated_count}/{total_files} files ({progress:.1f}%)")
+                # Update queue status progress
+                self.queue_status.current_progress = progress
                 
-                # Emit progress signal
+                # Emit signals
                 self.translation_progress.emit(progress)
+                self._emit_queue_status()
+                
+                # Log progress
+                logger.info(f"Translation progress: {translated_count}/{total_files} files ({progress:.1f}%)")
                 
                 # Wait before next check
                 import time
@@ -240,3 +371,40 @@ class MangaTranslatorService(QObject):
             except Exception as e:
                 logger.error(f"Error monitoring translation progress: {e}")
                 break
+    
+    def get_queue_status(self) -> tuple[int, TranslationTask]:
+        """Get current queue status"""
+        with self._queue_lock:
+            queue_size = self.translation_queue.qsize()
+            current_task = self.current_task
+        return queue_size, current_task
+    
+    def clear_queue(self):
+        """Clear the translation queue"""
+        with self._queue_lock:
+            while not self.translation_queue.empty():
+                self.translation_queue.get()
+                self.translation_queue.task_done()
+            
+            # Reset status
+            self.queue_status = QueueStatus(queued_chapters=[])
+            self._emit_queue_status()
+    
+    def _emit_queue_status(self):
+        """Emit current queue status"""
+        with self._queue_lock:
+            # Get list of queued chapters
+            queued_chapters = []
+            for item in list(self.translation_queue.queue):
+                queued_chapters.append(item)
+            
+            # Update status
+            self.queue_status = QueueStatus(
+                current_task=self.current_task,
+                current_progress=self.queue_status.current_progress,
+                tasks_remaining=self.translation_queue.qsize(),
+                queued_chapters=queued_chapters
+            )
+            
+            # Emit status
+            self.queue_status_changed.emit(self.queue_status)

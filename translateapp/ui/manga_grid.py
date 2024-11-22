@@ -1,39 +1,63 @@
-import tkinter as tk
-from tkinter import ttk
-from PIL import Image, ImageTk
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QPixmap
 import requests
+from PIL import Image
+from PIL.ImageQt import ImageQt
 from io import BytesIO
 import threading
 import logging
 
 logger = logging.getLogger(__name__)
 
-class MangaGrid(ttk.Frame):
-    def __init__(self, parent, manga, on_click=None):
+class MangaGrid(QWidget):
+    clicked = pyqtSignal(object)  # Signal emitted when manga is clicked
+    
+    def __init__(self, parent, manga):
         super().__init__(parent)
         self.manga = manga
-        self.on_click = on_click
+        
+        # Create layout
+        self.layout = QVBoxLayout(self)
+        self.layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
         # Create placeholder for image
-        self.photo = None
-        self.setup_ui()
+        self.cover_label = QLabel("Loading...")
+        self.cover_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.cover_label.setMinimumSize(150, 200)
+        self.layout.addWidget(self.cover_label)
+        
+        # Create title label
+        self.title_label = QLabel(self.manga.title)
+        self.title_label.setWordWrap(True)
+        self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.layout.addWidget(self.title_label)
+        
+        # Create rating label
+        self.rating_label = QLabel(f"Rating: {self.manga.rating}")
+        self.rating_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.layout.addWidget(self.rating_label)
+        
+        # Make widget clickable
+        self.setMouseTracking(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        
+        # Style
+        self.setStyleSheet("""
+            QWidget {
+                background-color: white;
+                border: 1px solid #ddd;
+                border-radius: 5px;
+                padding: 5px;
+            }
+            QWidget:hover {
+                background-color: #f0f0f0;
+                border-color: #bbb;
+            }
+        """)
+        
         # Load image in background
         threading.Thread(target=self._load_image_async, daemon=True).start()
-        
-    def setup_ui(self):
-        # Create cover label with loading placeholder
-        self.cover_label = ttk.Label(self, text="Loading...")
-        self.cover_label.pack()
-        
-        self.title_label = ttk.Label(self, text=self.manga.title, wraplength=150)
-        self.title_label.pack()
-        
-        self.rating_label = ttk.Label(self, text=f"Rating: {self.manga.rating}")
-        self.rating_label.pack()
-        
-        # Make the entire grid clickable
-        for child in self.winfo_children():
-            child.bind('<Button-1>', self._on_click)
     
     def _load_image_async(self):
         try:
@@ -41,26 +65,17 @@ class MangaGrid(ttk.Frame):
             img = Image.open(BytesIO(response.content))
             img = img.resize((150, 200), Image.Resampling.LANCZOS)
             
+            # Convert PIL image to QPixmap
+            qimg = ImageQt(img)
+            pixmap = QPixmap.fromImage(qimg)
+            
             # Update UI in main thread
-            self.after(0, self._update_image, img)
+            self.cover_label.setPixmap(pixmap)
             
         except Exception as e:
             logger.error(f"Error loading image for {self.manga.title}: {e}")
-            self.after(0, self._show_image_error)
+            self.cover_label.setText("Image\nNot Available")
     
-    def _update_image(self, img):
-        """Update the image in the UI (runs in main thread)"""
-        try:
-            self.photo = ImageTk.PhotoImage(img)
-            self.cover_label.configure(image=self.photo, text="")
-        except Exception as e:
-            logger.error(f"Error updating image for {self.manga.title}: {e}")
-            self._show_image_error()
-    
-    def _show_image_error(self):
-        """Show error message when image fails to load (runs in main thread)"""
-        self.cover_label.configure(text="Image\nNot Available")
-    
-    def _on_click(self, event):
-        if self.on_click:
-            self.on_click(self.manga) 
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit(self.manga) 

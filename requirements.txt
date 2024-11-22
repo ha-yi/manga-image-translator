@@ -53,3 +53,4 @@ bitsandbytes
 beautifulsoup4
 requests
 Pillow
+PyQt6

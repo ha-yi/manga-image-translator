@@ -12,6 +12,7 @@ import requests
 from io import BytesIO
 
 from ..web_parser import RawKumaParser
+from ..manga_translator_service import MangaTranslatorService
 
 logger = logging.getLogger(__name__)
 
@@ -249,6 +250,10 @@ class MainWindow(QMainWindow):
         # Add Translate Local Directories action
         translate_local_action = file_menu.addAction("Translate Local Directories")
         translate_local_action.triggered.connect(self.show_local_manga_dialog)
+        
+        # Add Local Manga Browser action
+        browse_local_action = file_menu.addAction("Local Manga Browser")
+        browse_local_action.triggered.connect(self.show_local_manga_browser)
         
         file_menu.addSeparator()
         file_menu.addAction("Exit", self.close)
@@ -560,3 +565,28 @@ class MainWindow(QMainWindow):
         from .local_manga_dialog import LocalMangaDialog
         dialog = LocalMangaDialog(self)
         dialog.exec()
+    
+    def show_local_manga_browser(self):
+        # Get translator service
+        translator = MangaTranslatorService.get_instance()
+        
+        # Load local mangas
+        local_mangas = translator.load_local_mangas()
+        
+        if not local_mangas:
+            QMessageBox.information(
+                self,
+                "No Local Manga",
+                "No locally stored manga found.\nDownload some chapters first."
+            )
+            return
+        
+        # Clear current manga list
+        self.current_manga_list = local_mangas
+        
+        # Hide navigation buttons
+        self.prev_button.hide()
+        self.next_button.hide()
+        
+        # Display local mangas
+        self.display_manga_list(local_mangas)

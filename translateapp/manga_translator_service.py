@@ -3,22 +3,25 @@ import requests
 import logging
 import zipfile
 import shutil
+import time
+import re
 from pathlib import Path
-from typing import Callable
+from typing import Callable, List
 from PyQt6.QtCore import QObject, pyqtSignal
-from .models import Chapter
+from .models import Chapter, Manga
 from runindir import run_translation
 import threading
 from queue import Queue, Empty
 from dataclasses import dataclass
 from datetime import datetime
+import json
 
 logger = logging.getLogger(__name__)
 
 @dataclass
 class TranslationTask:
     chapter: Chapter
-    manga_url: str
+    manga: Manga
 
 @dataclass
 class QueueStatus:
@@ -144,6 +147,21 @@ class MangaTranslatorService(QObject):
             manga_dir = os.path.join(self.base_dir, manga_id)
             os.makedirs(manga_dir, exist_ok=True)
             
+            # Save manga info if this is the first chapter
+            info_path = os.path.join(manga_dir, "manga-info.txt")
+            if not os.path.exists(info_path):
+                # Create dummy manga object for info saving
+                manga = Manga(
+                    title=chapter.manga_title,
+                    cover_image=chapter.manga_cover,
+                    rating=0.0,  # Default rating
+                    url=manga_url,
+                    chapters=[chapter],
+                    genres=[],
+                    description=""
+                )
+                self.save_manga_info(manga, manga_id)
+            
             # Download file
             if chapter.download_url:
                 # Use session to handle redirects
@@ -180,6 +198,10 @@ class MangaTranslatorService(QObject):
                             progress = (downloaded / total_size) * 100
                             logger.debug(f"Download progress: {progress:.1f}%")
                             self.download_progress.emit(progress)
+                
+                # todo confirm if the file is a zip file, check the downloaded file types not the extension.
+                # if not, fallback to use parses, create another method for that.
+                # these parser will load the HTML from chapter.url and then extract the images from the HTML
                 
                 logger.info(f"Successfully downloaded chapter {chapter.number} to {file_path}")
                 self.download_completed.emit(manga_dir)
@@ -408,3 +430,93 @@ class MangaTranslatorService(QObject):
             
             # Emit status
             self.queue_status_changed.emit(self.queue_status)
+    
+    def save_manga_info(self, manga: Manga, manga_id: str):
+        """Save manga information to local storage"""
+        try:
+            manga_dir = os.path.join(self.base_dir, manga_id)
+            os.makedirs(manga_dir, exist_ok=True)
+            
+            # Save cover image
+            if manga.cover_image:
+                response = requests.get(manga.cover_image)
+                cover_path = os.path.join(manga_dir, "cover.jpg")
+                with open(cover_path, 'wb') as f:
+                    f.write(response.content)
+            
+            # Save manga info as JSON
+            info = {
+                'title': manga.title,
+                'rating': manga.rating,
+                'description': manga.description,
+                'genres': manga.genres,
+                'url': manga.url
+            }
+            
+            info_path = os.path.join(manga_dir, "manga-info.txt")
+            with open(info_path, 'w', encoding='utf-8') as f:
+                json.dump(info, f, indent=2, ensure_ascii=False)
+                
+        except Exception as e:
+            logger.error(f"Error saving manga info: {e}")
+    
+    def load_local_mangas(self) -> List[Manga]:
+        """Load all locally stored manga information"""
+        mangas = []
+        
+        try:
+            # Scan base directory for manga folders
+            for manga_id in os.listdir(self.base_dir):
+                manga_dir = os.path.join(self.base_dir, manga_id)
+                if not os.path.isdir(manga_dir):
+                    continue
+                
+                # Check for manga info file
+                info_path = os.path.join(manga_dir, "manga-info.txt")
+                if not os.path.exists(info_path):
+                    continue
+                
+                # Load manga info
+                with open(info_path, 'r', encoding='utf-8') as f:
+                    info = json.load(f)
+                
+                # Get local cover path
+                cover_path = os.path.join(manga_dir, "cover.jpg")
+                if os.path.exists(cover_path):
+                    cover_url = f"file:///{cover_path}"
+                else:
+                    cover_url = ""
+                
+                # Get chapters from directory
+                chapters = []
+                chapter_pattern = r'chapter_(\d+(?:\.\d+)?).zip'
+                for file in os.listdir(manga_dir):
+                    match = re.match(chapter_pattern, file)
+                    if match:
+                        chapter_num = float(match.group(1))
+                        chapters.append(Chapter(
+                            title=f"Chapter {chapter_num}",
+                            url="",
+                            number=chapter_num,
+                            manga_title=info['title'],
+                            manga_id=manga_id,
+                            manga_cover=cover_url
+                        ))
+                
+                # Create Manga object
+                manga = Manga(
+                    title=info['title'],
+                    cover_image=cover_url,
+                    rating=info['rating'],
+                    url=info.get('url', ''),
+                    chapters=sorted(chapters, key=lambda x: x.number),
+                    genres=info.get('genres', []),
+                    description=info.get('description', '')
+                )
+                
+                mangas.append(manga)
+                
+        except Exception as e:
+            logger.error(f"Error loading local mangas: {e}")
+        
+        return mangas

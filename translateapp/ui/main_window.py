@@ -10,6 +10,7 @@ from PIL import Image
 from PIL.ImageQt import ImageQt
 import requests
 from io import BytesIO
+import os
 
 from ..web_parser import RawKumaParser
 from ..manga_translator_service import MangaTranslatorService
@@ -19,6 +20,7 @@ logger = logging.getLogger(__name__)
 class MangaCard(QFrame):
     clicked = pyqtSignal(object)
     image_loaded = pyqtSignal(QPixmap)
+    error_occurred = pyqtSignal()
     
     def __init__(self, manga, parent=None):
         super().__init__(parent)
@@ -119,15 +121,27 @@ class MangaCard(QFrame):
             if self._destroyed:
                 return
                 
-            response = requests.get(self.manga.cover_image)
-            img_data = response.content
+            if self.manga.cover_image.startswith('file:///'):
+                # Local file
+                file_path = self.manga.cover_image[8:]  # Remove 'file:///'
+                if os.path.exists(file_path):
+                    pixmap = QPixmap(file_path)
+                else:
+                    self.error_occurred.emit()
+                    return
+            else:
+                # Remote file
+                response = requests.get(self.manga.cover_image)
+                img_data = response.content
+                
+                if self._destroyed:
+                    return
+                
+                pixmap = QPixmap()
+                pixmap.loadFromData(img_data)
             
             if self._destroyed:
                 return
-            
-            # Create QPixmap directly from image data
-            pixmap = QPixmap()
-            pixmap.loadFromData(img_data)
             
             # Scale pixmap to fit the label while maintaining aspect ratio
             scaled_pixmap = pixmap.scaled(
@@ -148,12 +162,17 @@ class MangaCard(QFrame):
         except Exception as e:
             logger.error(f"Error loading image for {self.manga.title}: {e}")
             if not self._destroyed:
-                self.image_label.setText("Image\nNot Available")
+                self.error_occurred.emit()
     
     def _on_image_loaded(self, pixmap):
         """Update image in the main thread"""
         if not self._destroyed:
             self.image_label.setPixmap(pixmap)
+    
+    def _on_error(self):
+        """Handle error in the main thread"""
+        if not self._destroyed:
+            self.image_label.setText("Image\nNot Available")
     
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:

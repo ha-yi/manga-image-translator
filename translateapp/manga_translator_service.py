@@ -250,7 +250,7 @@ class MangaTranslatorService(QObject):
                 self._emit_queue_status()
                 
                 # Process the task
-                self._translate_chapter(task.chapter, task.manga_url)
+                self._translate_chapter(task.chapter, task.manga.url)
                 
                 # Mark task as done
                 self.translation_queue.task_done()
@@ -312,11 +312,55 @@ class MangaTranslatorService(QObject):
                         raise Exception("Failed to re-download chapter")
                 else:
                     raise Exception(f"Failed to extract chapter after {max_attempts} attempts")
+                
+            # Extra step: Convert WebP files to JPG
+            try:
+                from PIL import Image
+                
+                # Get all webp files
+                webp_files = [f for f in os.listdir(chapter_dir) 
+                            if f.lower().endswith('.webp')]
+                
+                if webp_files:
+                    logger.info(f"Found {len(webp_files)} WebP files, converting to JPG...")
+                    
+                    for webp_file in webp_files:
+                        webp_path = os.path.join(chapter_dir, webp_file)
+                        jpg_path = os.path.join(chapter_dir, 
+                                              webp_file.rsplit('.', 1)[0] + '.jpg')
+                        
+                        # Convert WebP to JPG
+                        try:
+                            with Image.open(webp_path) as img:
+                                # Convert to RGB if necessary
+                                if img.mode in ('RGBA', 'LA'):
+                                    background = Image.new('RGB', img.size, (255, 255, 255))
+                                    background.paste(img, mask=img.split()[-1])
+                                    img = background
+                                elif img.mode != 'RGB':
+                                    img = img.convert('RGB')
+                                
+                                # Save as JPG
+                                img.save(jpg_path, 'JPEG', quality=95)
+                            
+                            # Remove original WebP file
+                            os.remove(webp_path)
+                            logger.info(f"Converted {webp_file} to JPG")
+                            
+                        except Exception as e:
+                            logger.error(f"Error converting {webp_file}: {e}")
+                            # Continue with next file
+                            continue
+            
+            except ImportError:
+                logger.warning("PIL not available, skipping WebP conversion")
+            except Exception as e:
+                logger.error(f"Error during WebP conversion: {e}")
             
             # Step 3: Create translated directory
             os.makedirs(translated_dir, exist_ok=True)
             
-            # Get list of image files
+            # Get list of image files (now including converted JPGs)
             chapter_files = [f for f in os.listdir(chapter_dir) 
                            if f.lower().endswith(('.jpg', '.png', '.jpeg'))]
             total_files = len(chapter_files)
@@ -471,21 +515,23 @@ class MangaTranslatorService(QObject):
                 if not os.path.isdir(manga_dir):
                     continue
                 
-                # Check for manga info file
+                # Get manga info if available
                 info_path = os.path.join(manga_dir, "manga-info.txt")
-                if not os.path.exists(info_path):
-                    continue
-                
-                # Load manga info
-                with open(info_path, 'r', encoding='utf-8') as f:
-                    info = json.load(f)
-                
-                # Get local cover path
-                cover_path = os.path.join(manga_dir, "cover.jpg")
-                if os.path.exists(cover_path):
-                    cover_url = f"file:///{cover_path}"
+                if os.path.exists(info_path):
+                    with open(info_path, 'r', encoding='utf-8') as f:
+                        info = json.load(f)
                 else:
-                    cover_url = ""
+                    info = {
+                        'title': manga_id,
+                        'rating': 0.0,
+                        'description': '',
+                        'genres': [],
+                        'url': manga_id
+                    }
+                
+                # Get local cover path if available
+                cover_path = os.path.join(manga_dir, "cover.jpg")
+                cover_url = f"file:///{cover_path}" if os.path.exists(cover_path) else ""
                 
                 # Get chapters from directory
                 chapters = []

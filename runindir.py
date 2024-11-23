@@ -14,7 +14,7 @@ def extract_archive(archive_path, extract_dir):
         zip_ref.extractall(extract_subdir)
     return archive_name
 
-def run_translation(input_path, output_path=None, language="ENG", translator="sugoi", format="jpg", use_gpu=False, skip_no_text=True, colorizer="mc2"):
+def run_translation(input_path, output_path=None, language="ENG", translator="sugoi", format="jpg", use_gpu=False, skip_no_text=False, colorizer="mc2"):
     """
     Run translation on a given input path
     
@@ -47,8 +47,6 @@ def run_translation(input_path, output_path=None, language="ENG", translator="su
     
     if use_gpu:
         cmd.append("--use-gpu")
-    if skip_no_text:
-        cmd.append("--skip-no-text")
     if colorizer:
         cmd.append(f"--colorizer {colorizer}")
     

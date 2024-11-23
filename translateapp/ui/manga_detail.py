@@ -9,7 +9,10 @@ import logging
 import threading
 from ..web_parser import RawKumaParser
 from ..manga_translator_service import MangaTranslatorService, QueueStatus
-from ..models import Manga
+from ..models import Manga, Chapter
+import os
+import json
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -27,10 +30,10 @@ class MangaDetailsLoader(QObject):
             self.error.emit(str(e))
 
 class ChapterListItem(QWidget):
-    def __init__(self, chapter, manga_url, parent=None):
+    def __init__(self, chapter, manga, parent=None):
         super().__init__(parent)
         self.chapter = chapter
-        self.manga_url = manga_url
+        self.manga = manga
         self.is_translating = False
         
         # Set fixed height
@@ -123,8 +126,8 @@ class ChapterListItem(QWidget):
     
     def start_translation(self):
         """Add chapter to translation queue"""
-        # Add to queue
-        self.translator.start_translation(self.chapter, self.manga_url)
+        # Create translation task with manga object
+        self.translator.start_translation(self.chapter, self.manga)
         
         # Update button state
         self.translate_btn.setEnabled(False)
@@ -421,6 +424,27 @@ class MangaDetailWindow(QWidget):
     
     def _load_cover_image(self):
         try:
+            if not self.manga.url.startswith('http'):
+                # Load local cover image
+                cover_path = os.path.join(
+                    self.translator.base_dir,
+                    self.manga.title,
+                    "cover.jpg"
+                )
+                if os.path.exists(cover_path):
+                    pixmap = QPixmap(cover_path)
+                    scaled_pixmap = pixmap.scaled(
+                        300, 400,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation
+                    )
+                    self.image_loaded.emit(scaled_pixmap)
+                    return
+                else:
+                    self.cover_label.setText("No Cover\nAvailable")
+                    return
+            
+            # Load online cover image
             response = requests.get(self.manga.cover_image)
             img_data = response.content
             
@@ -433,7 +457,6 @@ class MangaDetailWindow(QWidget):
                 Qt.TransformationMode.SmoothTransformation
             )
             
-            # Emit signal instead of directly updating label
             self.image_loaded.emit(scaled_pixmap)
             
         except Exception as e:
@@ -445,11 +468,62 @@ class MangaDetailWindow(QWidget):
         self.cover_label.setPixmap(pixmap)
     
     def load_manga_details(self):
-        threading.Thread(
-            target=self.details_loader.load_details,
-            args=(self.manga,),
-            daemon=True
-        ).start()
+        if not self.manga.url.startswith('http'):
+            # Load details from local storage
+            self._load_local_manga_details()
+        else:
+            # Load details from web
+            threading.Thread(
+                target=self.details_loader.load_details,
+                args=(self.manga,),
+                daemon=True
+            ).start()
+    
+    def _load_local_manga_details(self):
+        """Load manga details from local storage"""
+        try:
+            # Get translator service
+            translator = MangaTranslatorService.get_instance()
+            
+            # Get manga ID from title (for local manga)
+            manga_dir = os.path.join(translator.base_dir, self.manga.title)
+            
+            # Load manga info
+            info_path = os.path.join(manga_dir, "manga-info.txt")
+            if os.path.exists(info_path):
+                with open(info_path, 'r', encoding='utf-8') as f:
+                    info = json.load(f)
+                    
+                # Update manga details
+                self.manga.description = info.get('description', '')
+                self.manga.genres = info.get('genres', [])
+                self.manga.rating = info.get('rating', 0.0)
+            
+            # Get chapters from directory
+            chapters = []
+            chapter_pattern = r'chapter_(\d+(?:\.\d+)?).zip'
+            for file in os.listdir(manga_dir):
+                match = re.match(chapter_pattern, file)
+                if match:
+                    chapter_num = float(match.group(1))
+                    chapters.append(Chapter(
+                        title=f"Chapter {chapter_num}",
+                        url="",
+                        number=chapter_num,
+                        manga_title=self.manga.title,
+                        manga_id=self.manga.title,
+                        manga_cover=self.manga.cover_image
+                    ))
+            
+            # Sort chapters and update manga
+            self.manga.chapters = sorted(chapters, key=lambda x: x.number)
+            
+            # Update UI
+            self._update_ui_with_details()
+            
+        except Exception as e:
+            logger.error(f"Error loading local manga details: {e}")
+            self._show_loading_error()
     
     def _on_details_loaded(self, details):
         """Handle loaded details in main thread"""
@@ -481,7 +555,7 @@ class MangaDetailWindow(QWidget):
         
         # Add chapters in reverse order (newest first)
         for chapter in sorted(self.manga.chapters, key=lambda x: x.number, reverse=True):
-            chapter_item = ChapterListItem(chapter, self.manga.url)
+            chapter_item = ChapterListItem(chapter, self.manga)
         
             
             # Check if chapter is translated

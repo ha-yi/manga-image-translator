@@ -3,6 +3,7 @@ from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                             QFileDialog, QMessageBox, QSpinBox)
 from PyQt6.QtCore import Qt
 import shutil
+import os
 from ..config import TranslatorConfig, ConfigManager
 
 class ConfigDialog(QDialog):

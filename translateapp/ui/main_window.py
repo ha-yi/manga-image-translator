@@ -2,8 +2,8 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                             QLineEdit, QPushButton, QScrollArea, QGridLayout,
                             QLabel, QMenuBar, QMenu, QMessageBox, QFrame, 
                             QDialog, QStackedWidget)
-from PyQt6.QtCore import Qt, pyqtSignal, QObject, QTimer, QUrl
-from PyQt6.QtGui import QPixmap, QPalette, QColor, QDesktopServices
+from PyQt6.QtCore import Qt, pyqtSignal, QObject, QTimer, QUrl, QSize
+from PyQt6.QtGui import QPixmap, QPalette, QColor, QDesktopServices, QIcon
 import logging
 import threading
 from PIL import Image
@@ -14,6 +14,7 @@ import os
 
 from ..web_parser import RawKumaParser
 from ..manga_translator_service import MangaTranslatorService
+from ..config import ConfigManager
 
 logger = logging.getLogger(__name__)
 
@@ -258,51 +259,116 @@ class MainWindow(QMainWindow):
         self.manga_loader.finished.connect(self._on_manga_loaded)
         self.manga_loader.error.connect(self._on_load_error)
         
+        # Add flag to track current view
+        self.current_view = "grid"  # Can be "grid", "detail", or "reader"
+        
         self.setup_ui()
         self.load_manga_page(1)
     
     def setup_ui(self):
         # Setup menubar
         menubar = self.menuBar()
+        
+        # File menu
         file_menu = menubar.addMenu("File")
         
-        # Add Translate Local Directories action
-        translate_local_action = file_menu.addAction("Translate Local Directories")
+        # Online/Offline manga group
+        online_action = file_menu.addAction("Online Manga")
+        online_action.triggered.connect(self.go_home)  # Load online grid
+        
+        offline_action = file_menu.addAction("Offline Manga")
+        offline_action.triggered.connect(self.show_local_manga_browser)  # Load offline grid
+        
+        translate_local_action = file_menu.addAction("Translate Local Directory")
         translate_local_action.triggered.connect(self.show_local_manga_dialog)
         
-        # Add Local Manga Browser action
-        browse_local_action = file_menu.addAction("Local Manga Browser")
-        browse_local_action.triggered.connect(self.show_local_manga_browser)
+        # Queue group
+        file_menu.addSeparator()
+        queue_group = file_menu.addSection("Queue")
+        queue_action = file_menu.addAction("Queue Manager")
+        queue_action.triggered.connect(self.show_queue_manager)
         
+        # Settings group
+        file_menu.addSeparator()
+        settings_group = file_menu.addSection("Settings")
+        config_action = file_menu.addAction("Translation Config")
+        config_action.triggered.connect(self.show_translation_config)
+        
+        # Exit
         file_menu.addSeparator()
         file_menu.addAction("Exit", self.close)
         
-        about_menu = menubar.addMenu("About")
-        about_menu.addAction("About", self.show_about)
-        
+        # Help menu
         help_menu = menubar.addMenu("Help")
+        help_menu.addAction("About", self.show_about)
         help_menu.addAction("Contact Support", self.show_help)
         
-        # Add Queue Manager menu at right
-        queue_menu = menubar.addMenu("Queue Manager")
-        queue_menu.addAction("Show Queue", self.show_queue_manager)
+        # Add flag to track current view
+        self.current_view = "grid"  # Can be "grid", "detail", or "reader"
         
         # Create central widget and main layout
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
         
+        # Top bar layout (Home + Search)
+        top_layout = QHBoxLayout()
+        
+        # Home button with icon
+        self.home_btn = QPushButton()
+        self.home_btn.setFixedSize(36, 36)
+        
+        # Try to use system home icon, fallback to text if not available
+        home_icon = QIcon.fromTheme("go-home")
+        if home_icon.isNull():
+            # Use unicode home symbol as fallback
+            self.home_btn.setText("⌂")
+            self.home_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #2196F3;
+                    color: white;
+                    border: none;
+                    border-radius: 18px;
+                    font-size: 20px;
+                    padding: 0px;
+                }
+                QPushButton:hover {
+                    background-color: #1E88E5;
+                }
+            """)
+        else:
+            self.home_btn.setIcon(home_icon)
+            self.home_btn.setIconSize(QSize(24, 24))
+            self.home_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #2196F3;
+                    border: none;
+                    border-radius: 18px;
+                    padding: 0px;
+                }
+                QPushButton:hover {
+                    background-color: #1E88E5;
+                }
+            """)
+        
+        self.home_btn.clicked.connect(self.go_home)
+        top_layout.addWidget(self.home_btn)
+        
+        # Add some spacing between home button and search bar
+        top_layout.addSpacing(8)
+        
         # Search bar
         search_layout = QHBoxLayout()
         self.search_bar = QLineEdit()
         self.search_bar.setPlaceholderText("Search manga...")
-        self.search_bar.returnPressed.connect(self.search_manga)
         self.search_button = QPushButton("Search")
         self.search_button.clicked.connect(self.search_manga)
         
         search_layout.addWidget(self.search_bar)
         search_layout.addWidget(self.search_button)
-        main_layout.addLayout(search_layout)
+        top_layout.addLayout(search_layout)
+        
+        main_layout.addLayout(top_layout)
         
         # Create stacked widget for navigation
         self.stacked_widget = QStackedWidget()
@@ -347,9 +413,8 @@ class MainWindow(QMainWindow):
     def search_manga(self):
         search_text = self.search_bar.text().strip()
         if search_text:
-            # If currently on detail view, switch back to grid view
-            if self.stacked_widget.currentWidget() == self.detail_page:
-                self.show_main_view()
+            # Switch back to grid view first
+            self.show_main_view()
             
             # Disable search controls while loading
             self.search_bar.setEnabled(False)
@@ -439,8 +504,9 @@ class MainWindow(QMainWindow):
     
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        # Restart the timer on each resize event
-        self.resize_timer.start()
+        # Only recalculate grid if we're in grid view
+        if self.current_view == "grid" and self.current_manga_list:
+            self.resize_timer.start()
     
     def _handle_resize(self):
         # Only redisplay if we have manga to show
@@ -496,23 +562,97 @@ class MainWindow(QMainWindow):
     
     def show_manga_detail(self, manga):
         from .manga_detail import MangaDetailWindow
-        
-        # Create detail page if it doesn't exist
-        if self.detail_page is None:
-            self.detail_page = MangaDetailWindow(self, manga)
-            self.stacked_widget.addWidget(self.detail_page)
-        else:
-            # Update existing detail page with new manga
-            self.detail_page.update_manga(manga)
-        
-        # Switch to detail page
-        self.stacked_widget.setCurrentWidget(self.detail_page)
+        self.current_view = "detail"  # Update current view
+        detail_window = MangaDetailWindow(self, manga)
+        self.setCentralWidget(detail_window)
     
     def show_main_view(self):
-        # Switch back to grid page
-        self.stacked_widget.setCurrentWidget(self.grid_page)
+        self.current_view = "grid"  # Update current view
+        # Create central widget
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QVBoxLayout(central_widget)
         
-        # Redisplay current manga list if needed
+        # Top bar layout (Home + Search)
+        top_layout = QHBoxLayout()
+        
+        # Home button with icon
+        self.home_btn = QPushButton()
+        self.home_btn.setFixedSize(36, 36)
+        
+        # Try to use system home icon, fallback to text if not available
+        home_icon = QIcon.fromTheme("go-home")
+        if home_icon.isNull():
+            # Use unicode home symbol as fallback
+            self.home_btn.setText("⌂")
+            self.home_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #2196F3;
+                    color: white;
+                    border: none;
+                    border-radius: 18px;
+                    font-size: 20px;
+                    padding: 0px;
+                }
+                QPushButton:hover {
+                    background-color: #1E88E5;
+                }
+            """)
+        else:
+            self.home_btn.setIcon(home_icon)
+            self.home_btn.setIconSize(QSize(24, 24))
+            self.home_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #2196F3;
+                    border: none;
+                    border-radius: 18px;
+                    padding: 0px;
+                }
+                QPushButton:hover {
+                    background-color: #1E88E5;
+                }
+            """)
+        
+        self.home_btn.clicked.connect(self.go_home)
+        top_layout.addWidget(self.home_btn)
+        
+        # Add some spacing between home button and search bar
+        top_layout.addSpacing(8)
+        
+        # Search bar
+        search_layout = QHBoxLayout()
+        self.search_bar = QLineEdit()
+        self.search_bar.setPlaceholderText("Search manga...")
+        self.search_button = QPushButton("Search")
+        self.search_button.clicked.connect(self.search_manga)
+        
+        search_layout.addWidget(self.search_bar)
+        search_layout.addWidget(self.search_button)
+        top_layout.addLayout(search_layout)
+        
+        main_layout.addLayout(top_layout)
+        
+        # Restore manga grid
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.grid_widget = QWidget()
+        self.grid_layout = QGridLayout(self.grid_widget)
+        self.scroll_area.setWidget(self.grid_widget)
+        main_layout.addWidget(self.scroll_area)
+        
+        # Restore navigation buttons
+        nav_layout = QHBoxLayout()
+        self.prev_button = QPushButton("Load Previous")
+        self.prev_button.clicked.connect(self.load_previous_page)
+        
+        self.next_button = QPushButton("Load Next")
+        self.next_button.clicked.connect(self.load_next_page)
+        
+        nav_layout.addWidget(self.prev_button)
+        nav_layout.addWidget(self.next_button)
+        main_layout.addLayout(nav_layout)
+        
+        # Redisplay current manga list
         if self.current_manga_list:
             self.display_manga_list(self.current_manga_list)
             
@@ -600,12 +740,126 @@ class MainWindow(QMainWindow):
             )
             return
         
-        # Clear current manga list
+        # Create new central widget
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QVBoxLayout(central_widget)
+        
+        # Add top bar with home button
+        main_layout.addLayout(self.create_top_bar())
+        
+        # Create scroll area for manga grid
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.grid_widget = QWidget()
+        self.grid_layout = QGridLayout(self.grid_widget)
+        self.scroll_area.setWidget(self.grid_widget)
+        main_layout.addWidget(self.scroll_area)
+        
+        # Clear current manga list and display local mangas
         self.current_manga_list = local_mangas
+        self.display_manga_list(local_mangas)
         
         # Hide navigation buttons
         self.prev_button.hide()
         self.next_button.hide()
+    
+    def show_manga_reader(self, manga, chapter):
+        from .manga_reader import MangaReader
+        self.current_view = "reader"  # Update current view
+        reader = MangaReader(manga, chapter, self)
+        self.setCentralWidget(reader)
+    
+    def go_home(self):
+        """Reset UI to initial state and load first page"""
+        # Clear search bar
+        self.search_bar.clear()
         
-        # Display local mangas
-        self.display_manga_list(local_mangas)
+        # Show main view
+        self.show_main_view()
+        
+        # Reset page counter
+        self.current_page = 1
+        self.has_previous = False
+        self.next_url = None
+        
+        # Load first page
+        self.load_manga_page(1)
+    
+    def create_top_bar(self) -> QHBoxLayout:
+        """Create and return the top bar with home button and search"""
+        top_layout = QHBoxLayout()
+        
+        # Home button with icon
+        self.home_btn = QPushButton()
+        self.home_btn.setFixedSize(36, 36)
+        
+        # Try to use system home icon, fallback to text if not available
+        home_icon = QIcon.fromTheme("go-home")
+        if home_icon.isNull():
+            self.home_btn.setText("⌂")
+            self.home_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #2196F3;
+                    color: white;
+                    border: none;
+                    border-radius: 18px;
+                    font-size: 20px;
+                    padding: 0px;
+                }
+                QPushButton:hover {
+                    background-color: #1E88E5;
+                }
+            """)
+        else:
+            self.home_btn.setIcon(home_icon)
+            self.home_btn.setIconSize(QSize(24, 24))
+            self.home_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #2196F3;
+                    border: none;
+                    border-radius: 18px;
+                    padding: 0px;
+                }
+                QPushButton:hover {
+                    background-color: #1E88E5;
+                }
+            """)
+        
+        self.home_btn.clicked.connect(self.go_home)
+        top_layout.addWidget(self.home_btn)
+        
+        # Add some spacing between home button and search bar
+        top_layout.addSpacing(8)
+        
+        # Search bar
+        search_layout = QHBoxLayout()
+        self.search_bar = QLineEdit()
+        self.search_bar.setPlaceholderText("Search manga...")
+        self.search_button = QPushButton("Search")
+        self.search_button.clicked.connect(self.search_manga)
+        
+        search_layout.addWidget(self.search_bar)
+        search_layout.addWidget(self.search_button)
+        top_layout.addLayout(search_layout)
+        
+        return top_layout
+    
+    def show_translation_config(self):
+        from .config_dialog import ConfigDialog
+        dialog = ConfigDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            # Reload configuration in translator service
+            translator = MangaTranslatorService.get_instance()
+            translator.reload_config()
+            
+            # Also reload config in main window
+            self.config_manager = ConfigManager()
+            self.config = self.config_manager.load_config()
+            
+            # Show confirmation
+            QMessageBox.information(
+                self,
+                "Configuration Saved",
+                "Translation configuration has been updated successfully."
+            )

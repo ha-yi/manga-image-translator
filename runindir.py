@@ -14,47 +14,71 @@ def extract_archive(archive_path, extract_dir):
         zip_ref.extractall(extract_subdir)
     return archive_name
 
-def run_translation(input_path, output_path=None, language="ENG", translator="sugoi", format="jpg", use_gpu=False, skip_no_text=False, colorizer="mc2"):
+def run_translation(input_dir: str, output_dir: str, 
+                   translator: str = "sugoi",
+                   target_lang: str = "ENG",
+                   upscale_ratio: float = 1.0,
+                   colorize: bool = True,
+                   use_gpu: bool = False,
+                   force_uppercase: bool = False,
+                   ignore_error: bool = False):
     """
-    Run translation on a given input path
-    
+    Run translation on all images in input directory
     Args:
-        input_path (str): Path to the directory to translate
-        output_path (str): Path to the output directory (default: None)
-        language (str): Target language code (default: "ENG")
-        translator (str): Translator to use (default: "sugoi")
-        format (str): Output format (default: "jpg")
-        use_gpu (bool): Whether to use GPU acceleration (default: False)
-        skip_no_text (bool): Whether to skip images with no text (default: True)
-        colorizer (str): Colorizer to use (default: "mc2")
-    
-    Returns:
-        tuple: (stdout, stderr) from the translation process
+        input_dir: Directory containing input images
+        output_dir: Directory to save translated images
+        translator: Translation engine to use
+        target_lang: Target language code
+        upscale_ratio: Image upscale ratio (1.0, 1.5, 2.0)
+        colorize: Whether to colorize text
+        use_gpu: Whether to use GPU
+        force_uppercase: Whether to force uppercase text
+        ignore_error: Whether to ignore errors and continue
     """
-    # Build command with all parameters
+    # Create command with config parameters
     cmd = [
-        "python -m manga_translator",
-        "-v",
-        "--mode batch",
-        f"--translator {translator}",
-        f"-l {language}",
-        f"-i {input_path}",
-        f"--format {format}"
+        "python", "-m", "manga_translator",
+        "--mode", "batch",
+        "--translator", translator,
+        "-l", target_lang,
+        "-i", input_dir,
+        "--dest", output_dir,
+        "--upscale-ratio", str(upscale_ratio)
     ]
     
-    if output_path:
-        cmd.append(f"--dest {output_path}")
-    
+    # Add optional flags
+    if colorize:
+        cmd.append("--colorizer")
+        cmd.append("mc2")
     if use_gpu:
         cmd.append("--use-gpu")
-    if colorizer:
-        cmd.append(f"--colorizer {colorizer}")
+    if force_uppercase:
+        cmd.append("--uppercase")
+    if ignore_error:
+        cmd.append("--ignore-errors")
     
-    # Run the command
-    process = subprocess.run(" ".join(cmd), shell=True, capture_output=True, text=True)
-    return process.stdout, process.stderr
+    # Run command
+    import subprocess
+    try:
+        process = subprocess.run(" ".join(cmd), shell=True, check=True, capture_output=True, text=True)
+        if process.returncode != 0:
+            raise RuntimeError(f"Translation failed with error: {process.stderr}")
+        return process.stdout, process.stderr
+    except subprocess.CalledProcessError as e:
+        if not ignore_error:
+            raise RuntimeError(f"Translation failed: {e.stderr}")
+        return None, e.stderr
 
-def run_single_translation(input_file, output_path, language="ENG", translator="sugoi", format="jpg", use_gpu=True, skip_no_text=True, colorizer="mc2"):
+def run_single_translation(
+        input_file, 
+        output_path, 
+        language="ENG", 
+        translator="sugoi", 
+        format="jpg", 
+        use_gpu=True, 
+        skip_no_text=True, 
+        colorizer="mc2"
+        ):
     """
     Run translation on a single image file
     

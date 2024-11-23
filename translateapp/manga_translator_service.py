@@ -15,6 +15,7 @@ from queue import Queue, Empty
 from dataclasses import dataclass
 from datetime import datetime
 import json
+from .config import ConfigManager
 
 logger = logging.getLogger(__name__)
 
@@ -69,8 +70,13 @@ class MangaTranslatorService(QObject):
             return
             
         super().__init__()
-        # Get user's documents directory
-        self.base_dir = os.path.join(Path.home(), "Documents", "rawkuma")
+        
+        # Load configuration
+        self.config_manager = ConfigManager()
+        self.config = self.config_manager.load_config()
+        
+        # Get user's documents directory from config
+        self.base_dir = self.config.manga_directory
         # Create directory if it doesn't exist
         os.makedirs(self.base_dir, exist_ok=True)
         
@@ -377,10 +383,23 @@ class MangaTranslatorService(QObject):
             )
             monitor_thread.start()
             
-            # Run translation
+            # Run translation with config parameters
             from runindir import run_translation
             logger.info(f"Starting translation for chapter {chapter.number}...")
-            run_translation(chapter_dir, translated_dir)
+            
+            # Pass config parameters to run_translation
+            run_translation(
+                chapter_dir, 
+                translated_dir,
+                translator=self.config.translator,
+                target_lang=self.config.target_language,
+                upscale_ratio=self.config.upscale_ratio,
+                colorize=self.config.colorize,
+                use_gpu=self.config.use_gpu,
+                force_uppercase=self.config.force_uppercase,
+                ignore_error=self.config.ignore_error
+            )
+            
             logger.info("Translation completed")
             
             # Stop monitoring
@@ -566,3 +585,11 @@ class MangaTranslatorService(QObject):
             logger.error(f"Error loading local mangas: {e}")
         
         return mangas
+    
+    def reload_config(self):
+        """Reload configuration"""
+        self.config = self.config_manager.load_config()
+        # Update base directory if changed
+        if self.base_dir != self.config.manga_directory:
+            self.base_dir = self.config.manga_directory
+            os.makedirs(self.base_dir, exist_ok=True)

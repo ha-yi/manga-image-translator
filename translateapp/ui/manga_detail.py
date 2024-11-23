@@ -30,10 +30,11 @@ class MangaDetailsLoader(QObject):
             self.error.emit(str(e))
 
 class ChapterListItem(QWidget):
-    def __init__(self, chapter, manga, parent=None):
+    def __init__(self, chapter, manga, main_window, parent=None):
         super().__init__(parent)
         self.chapter = chapter
         self.manga = manga
+        self.main_window = main_window
         self.is_translating = False
         
         # Set fixed height
@@ -123,6 +124,9 @@ class ChapterListItem(QWidget):
         
         # Check initial queue status
         self.update_button_state()
+        
+        # Make widget clickable
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
     
     def start_translation(self):
         """Add chapter to translation queue"""
@@ -175,6 +179,12 @@ class ChapterListItem(QWidget):
             self.translate_btn.setText("In Queue")
         else:
             self.translate_btn.setText("Translate")
+    
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            # Check if translated
+            if self.translator.is_translated(self.chapter, self.manga.url):
+                self.main_window.show_manga_reader(self.manga, self.chapter)
 
 class MangaDetailWindow(QWidget):
     image_loaded = pyqtSignal(QPixmap)  # Signal for image loading
@@ -182,7 +192,8 @@ class MangaDetailWindow(QWidget):
     def __init__(self, parent, manga):
         super().__init__(parent)
         self.parent = parent
-        self.manga = manga  # Set manga first
+        self.manga = manga
+        self.main_window = parent  # Store main window reference
         
         # Get translator service instance
         self.translator = MangaTranslatorService.get_instance()
@@ -555,7 +566,7 @@ class MangaDetailWindow(QWidget):
         
         # Add chapters in reverse order (newest first)
         for chapter in sorted(self.manga.chapters, key=lambda x: x.number, reverse=True):
-            chapter_item = ChapterListItem(chapter, self.manga)
+            chapter_item = ChapterListItem(chapter, self.manga, self.main_window)
         
             
             # Check if chapter is translated

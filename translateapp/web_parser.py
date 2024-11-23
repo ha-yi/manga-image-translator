@@ -198,3 +198,54 @@ class RawKumaParser:
             'description': description,
             'genres': genres
         }
+    
+    @staticmethod
+    def parse_chapter_images(chapter_url: str) -> list[str]:
+        """
+        Parse manga images from chapter page
+        Returns list of image URLs
+        """
+        logger.info(f"Parsing images from chapter: {chapter_url}")
+        try:
+            response = requests.get(chapter_url)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Try different common selectors for manga images
+            image_elements = (
+                soup.select('#readerarea img') or  # Most common
+                soup.select('.reading-content img') or
+                soup.select('.entry-content img') or
+                soup.select('.reader-area img')
+            )
+            
+            if not image_elements:
+                logger.error("No images found on chapter page")
+                return []
+            
+            image_urls = []
+            for img in image_elements:
+                # Try different image source attributes
+                img_url = (
+                    img.get('src') or 
+                    img.get('data-src') or 
+                    img.get('data-lazy-src')
+                )
+                
+                if img_url:
+                    # Clean up URL
+                    img_url = img_url.strip()
+                    if img_url.startswith('//'):
+                        img_url = 'https:' + img_url
+                    
+                    # Only add if it's an image URL
+                    if any(img_url.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.webp']):
+                        image_urls.append(img_url)
+                        logger.debug(f"Found image URL: {img_url}")
+            
+            logger.info(f"Found {len(image_urls)} images")
+            return image_urls
+            
+        except Exception as e:
+            logger.error(f"Error parsing chapter images: {e}")
+            return []

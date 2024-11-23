@@ -16,11 +16,20 @@ from dataclasses import dataclass
 from datetime import datetime
 import json
 from .config import ConfigManager
+from .web_parser import RawKumaParser
+import tempfile
+from PIL import Image
+import io
 
 logger = logging.getLogger(__name__)
 
 @dataclass
 class TranslationTask:
+    chapter: Chapter
+    manga: Manga
+
+@dataclass
+class DownloadTask:
     chapter: Chapter
     manga: Manga
 
@@ -80,11 +89,19 @@ class MangaTranslatorService(QObject):
         # Create directory if it doesn't exist
         os.makedirs(self.base_dir, exist_ok=True)
         
-        # Translation queue
+        # Separate queues for download and translation
+        self.download_queue = Queue()
         self.translation_queue = Queue()
-        self.is_processing = False
-        self.current_task = None
-        self._queue_lock = threading.Lock()
+        
+        # Processing flags
+        self.is_downloading = False
+        self.is_translating = False
+        self.current_download = None
+        self.current_translation = None
+        
+        # Queue locks
+        self._download_lock = threading.Lock()
+        self._translation_lock = threading.Lock()
         
         # Queue status
         self.queue_status = QueueStatus(
@@ -105,7 +122,12 @@ class MangaTranslatorService(QObject):
         return cls._instance
     
     def get_manga_id(self, url: str) -> str:
-        """Extract manga ID from URL"""
+        """Extract manga ID from URL or use title for local manga"""
+        if not url.startswith('http'):
+            # For local manga, use the URL (which is actually the title) as ID
+            return url
+        
+        # For online manga, extract ID from URL
         url = url.rstrip('/')  # Remove trailing slash if present
         return url.split('/')[-1]
     
@@ -140,11 +162,18 @@ class MangaTranslatorService(QObject):
     
     def start_download(self, chapter: Chapter, manga_url: str):
         """
-        Start downloading chapter in background
-        Args:
-            chapter: Chapter object containing download information
-            manga_url: URL of the manga (for ID extraction)
+        Start downloading chapter directly without queueing
         """
+        # Create a separate thread for download to keep UI responsive
+        download_thread = threading.Thread(
+            target=self._download_chapter,
+            args=(chapter, manga_url),
+            daemon=True
+        )
+        download_thread.start()
+    
+    def _download_chapter(self, chapter: Chapter, manga_url: str):
+        """Internal method to handle the download process"""
         try:
             # Get manga ID from URL
             manga_id = self.get_manga_id(manga_url)
@@ -153,14 +182,13 @@ class MangaTranslatorService(QObject):
             manga_dir = os.path.join(self.base_dir, manga_id)
             os.makedirs(manga_dir, exist_ok=True)
             
-            # Save manga info if this is the first chapter
+            # Save manga info if this is first chapter
             info_path = os.path.join(manga_dir, "manga-info.txt")
             if not os.path.exists(info_path):
-                # Create dummy manga object for info saving
                 manga = Manga(
                     title=chapter.manga_title,
                     cover_image=chapter.manga_cover,
-                    rating=0.0,  # Default rating
+                    rating=0.0,
                     url=manga_url,
                     chapters=[chapter],
                     genres=[],
@@ -168,57 +196,62 @@ class MangaTranslatorService(QObject):
                 )
                 self.save_manga_info(manga, manga_id)
             
-            # Download file
+            # Try direct download first if URL is available
             if chapter.download_url:
-                # Use session to handle redirects
-                session = requests.Session()
-                response = session.get(
-                    chapter.download_url, 
-                    stream=True,
-                    allow_redirects=True  # Explicitly allow redirects
-                )
-                
-                # Log response content type and size
-                content_type = response.headers.get('content-type', 'unknown')
-                content_size = response.headers.get('content-length', 'unknown')
-                logger.info(f"Response content type: {content_type}, size: {content_size} bytes")
-                
-                response.raise_for_status()
-                
-                # Get filename from URL or use default
-                filename = f"chapter_{chapter.number}.zip"
-                file_path = os.path.join(manga_dir, filename)
-                
-                # Download with progress tracking
-                total_size = int(response.headers.get('content-length', 0))
-                block_size = 8192
-                downloaded = 0
-                
-                with open(file_path, 'wb') as f:
-                    for data in response.iter_content(block_size):
-                        downloaded += len(data)
-                        f.write(data)
-                        
-                        # Calculate and report progress
-                        if total_size > 0:
-                            progress = (downloaded / total_size) * 100
-                            logger.debug(f"Download progress: {progress:.1f}%")
-                            self.download_progress.emit(progress)
-                
-                # todo confirm if the file is a zip file, check the downloaded file types not the extension.
-                # if not, fallback to use parses, create another method for that.
-                # these parser will load the HTML from chapter.url and then extract the images from the HTML
-                
-                logger.info(f"Successfully downloaded chapter {chapter.number} to {file_path}")
-                self.download_completed.emit(manga_dir)
-                return file_path
-                
-            else:
-                raise ValueError("No download URL provided for chapter")
-                
+                try:
+                    session = requests.Session()
+                    response = session.get(
+                        chapter.download_url, 
+                        stream=True,
+                        allow_redirects=True
+                    )
+                    
+                    response.raise_for_status()
+                    
+                    filename = f"chapter_{chapter.number}.zip"
+                    file_path = os.path.join(manga_dir, filename)
+                    
+                    # Download with progress tracking
+                    total_size = int(response.headers.get('content-length', 0))
+                    block_size = 8192
+                    downloaded = 0
+                    
+                    with open(file_path, 'wb') as f:
+                        for data in response.iter_content(block_size):
+                            downloaded += len(data)
+                            f.write(data)
+                            if total_size > 0:
+                                progress = (downloaded / total_size) * 100
+                                self.download_progress.emit(progress)
+                    
+                    # Verify zip file
+                    try:
+                        with zipfile.ZipFile(file_path, 'r') as zf:
+                            has_images = any(
+                                name.lower().endswith(('.jpg', '.png', '.jpeg', '.webp'))
+                                for name in zf.namelist()
+                            )
+                            if has_images:
+                                self.download_completed.emit(manga_dir)
+                                return file_path
+                    except zipfile.BadZipFile:
+                        logger.warning("Invalid zip file from direct download")
+                        if os.path.exists(file_path):
+                            os.remove(file_path)
+                        raise ValueError("Invalid zip file")
+                    
+                except Exception as e:
+                    logger.warning(f"Direct download failed: {e}")
+                    # Continue to HTML method
+            
+            # Fallback to HTML method
+            logger.info("Using HTML download method")
+            return self._download_from_html(chapter, manga_id)
+            
         except Exception as e:
-            logger.error(f"Error downloading chapter {chapter.number}: {e}")
-            self.download_error.emit(str(e))
+            error_msg = f"Error downloading chapter {chapter.number}: {str(e)}"
+            logger.error(error_msg)
+            self.download_error.emit(error_msg)
             return None
     
     def extract_chapter(self, zip_path: str, extract_dir: str) -> bool:
@@ -231,45 +264,120 @@ class MangaTranslatorService(QObject):
             logger.error(f"Error extracting zip file: {e}")
             return False
     
-    def start_translation(self, chapter: Chapter, manga_url: str):
-        """Add translation task to queue and start processing if not already running"""
-        task = TranslationTask(chapter, manga_url)
-        
-        with self._queue_lock:
-            self.translation_queue.put(task)
-            if not self.is_processing:
-                self.is_processing = True
-                threading.Thread(target=self._process_queue, daemon=True).start()
-        
-        # Emit updated queue status
-        self._emit_queue_status()
+    # entry point for translation
+    def start_translation(self, chapter: Chapter, manga: Manga):
+        """Entry point for translation process - starts with download queue"""
+        try:
+            # Handle local manga differently
+            if not manga.url.startswith('http'):
+                logger.info(f"Processing local manga chapter {chapter.number}")
+                # For local manga, skip download queue and go straight to translation
+                self._add_to_translation_queue(chapter, manga)
+                return
+            
+            # Create download task for online manga
+            download_task = DownloadTask(chapter=chapter, manga=manga)
+            
+            with self._download_lock:
+                # Check if already downloaded
+                if self.is_downloaded(chapter, manga.url):
+                    logger.info(f"Chapter {chapter.number} already downloaded, adding to translation queue")
+                    self._add_to_translation_queue(chapter, manga)
+                else:
+                    # Add to download queue
+                    self.download_queue.put(download_task)
+                    if not self.is_downloading:
+                        self.is_downloading = True
+                        threading.Thread(target=self._process_download_queue, daemon=True).start()
+            
+            self._emit_queue_status()
+            
+        except Exception as e:
+            logger.error(f"Error starting translation process: {e}")
+            self.translation_error.emit(str(e))
     
-    def _process_queue(self):
-        """Process translation tasks from queue"""
+    def _process_download_queue(self):
+        """Process download queue"""
         while True:
             try:
-                # Get next task from queue
-                task = self.translation_queue.get(block=False)
-                self.current_task = task
+                # Get next download task
+                task = self.download_queue.get(block=False)
+                self.current_download = task
                 
-                # Update and emit queue status
+                # Update status
                 self._emit_queue_status()
                 
-                # Process the task
-                self._translate_chapter(task.chapter, task.manga.url)
+                # Download chapter
+                result = self._download_chapter(task.chapter, task.manga.url)
                 
-                # Mark task as done
-                self.translation_queue.task_done()
-                self.current_task = None
-                self.queue_status.current_progress = 0
+                if result:
+                    logger.info(f"Download completed for chapter {task.chapter.number}")
+                    # Add to translation queue
+                    self._add_to_translation_queue(task.chapter, task.manga)
+                else:
+                    logger.error(f"Download failed for chapter {task.chapter.number}")
                 
-                # Emit updated queue status
+                # Mark download task as done
+                self.download_queue.task_done()
+                self.current_download = None
+                
+                # Update status
                 self._emit_queue_status()
                 
             except Empty:
                 # Queue is empty, stop processing
-                self.is_processing = False
-                self.current_task = None
+                self.is_downloading = False
+                self.current_download = None
+                self._emit_queue_status()
+                break
+            except Exception as e:
+                logger.error(f"Error processing download queue: {e}")
+                self.download_error.emit(str(e))
+                # Continue with next task
+                continue
+    
+    def _add_to_translation_queue(self, chapter: Chapter, manga: Manga):
+        """Add chapter to translation queue and start processing if needed"""
+        translation_task = TranslationTask(chapter=chapter, manga=manga)
+        
+        with self._translation_lock:
+            self.translation_queue.put(translation_task)
+            if not self.is_translating:
+                self.is_translating = True
+                threading.Thread(target=self._process_translation_queue, daemon=True).start()
+        
+        self._emit_queue_status()
+    
+    def _process_translation_queue(self):
+        """Process translation queue"""
+        while True:
+            try:
+                # Get next translation task
+                task = self.translation_queue.get(block=False)
+                self.current_translation = task
+                
+                # Update status
+                self._emit_queue_status()
+                
+                # Check if already translated
+                if not self.is_translated(task.chapter, task.manga.url):
+                    # Process the translation
+                    self._translate_chapter(task.chapter, task.manga.url)
+                else:
+                    logger.info(f"Chapter {task.chapter.number} already translated, skipping")
+                
+                # Mark translation task as done
+                self.translation_queue.task_done()
+                self.current_translation = None
+                self.queue_status.current_progress = 0
+                
+                # Update status
+                self._emit_queue_status()
+                
+            except Empty:
+                # Queue is empty, stop processing
+                self.is_translating = False
+                self.current_translation = None
                 self.queue_status.current_progress = 0
                 self._emit_queue_status()
                 break
@@ -288,14 +396,10 @@ class MangaTranslatorService(QObject):
             chapter_dir = os.path.join(manga_dir, f"chapter_{chapter.number}")
             translated_dir = os.path.join(manga_dir, f"chapter_{chapter.number}_translated")
             
-            # Step 1: Check and handle zip file
-            if not os.path.exists(chapter_zip):
-                logger.info(f"Chapter zip not found, downloading...")
-                chapter_zip = self.start_download(chapter, manga_url)
-                if not chapter_zip:
-                    raise Exception("Failed to download chapter")
+            # Create translation directory
+            os.makedirs(translated_dir, exist_ok=True)
             
-            # Step 2: Check and handle chapter directory
+            # Step 1: Check and handle chapter directory
             extraction_needed = False
             if not os.path.exists(chapter_dir):
                 os.makedirs(chapter_dir)
@@ -304,76 +408,19 @@ class MangaTranslatorService(QObject):
                 extraction_needed = True
             
             # Extract if needed
-            if extraction_needed:
+            if extraction_needed and os.path.exists(chapter_zip):
                 logger.info(f"Extracting chapter {chapter.number}...")
-                max_attempts = 3
-                for attempt in range(max_attempts):
-                    if self.extract_chapter(chapter_zip, chapter_dir):
-                        break
-                    logger.warning(f"Extraction attempt {attempt + 1} failed, retrying...")
-                    if os.path.exists(chapter_zip):
-                        os.remove(chapter_zip)
-                    chapter_zip = self.start_download(chapter, manga_url)
-                    if not chapter_zip:
-                        raise Exception("Failed to re-download chapter")
-                else:
-                    raise Exception(f"Failed to extract chapter after {max_attempts} attempts")
-                
-            # Extra step: Convert WebP files to JPG
-            try:
-                from PIL import Image
-                
-                # Get all webp files
-                webp_files = [f for f in os.listdir(chapter_dir) 
-                            if f.lower().endswith('.webp')]
-                
-                if webp_files:
-                    logger.info(f"Found {len(webp_files)} WebP files, converting to JPG...")
-                    
-                    for webp_file in webp_files:
-                        webp_path = os.path.join(chapter_dir, webp_file)
-                        jpg_path = os.path.join(chapter_dir, 
-                                              webp_file.rsplit('.', 1)[0] + '.jpg')
-                        
-                        # Convert WebP to JPG
-                        try:
-                            with Image.open(webp_path) as img:
-                                # Convert to RGB if necessary
-                                if img.mode in ('RGBA', 'LA'):
-                                    background = Image.new('RGB', img.size, (255, 255, 255))
-                                    background.paste(img, mask=img.split()[-1])
-                                    img = background
-                                elif img.mode != 'RGB':
-                                    img = img.convert('RGB')
-                                
-                                # Save as JPG
-                                img.save(jpg_path, 'JPEG', quality=95)
-                            
-                            # Remove original WebP file
-                            os.remove(webp_path)
-                            logger.info(f"Converted {webp_file} to JPG")
-                            
-                        except Exception as e:
-                            logger.error(f"Error converting {webp_file}: {e}")
-                            # Continue with next file
-                            continue
+                if not self.extract_chapter(chapter_zip, chapter_dir):
+                    raise Exception("Failed to extract chapter")
             
-            except ImportError:
-                logger.warning("PIL not available, skipping WebP conversion")
-            except Exception as e:
-                logger.error(f"Error during WebP conversion: {e}")
-            
-            # Step 3: Create translated directory
-            os.makedirs(translated_dir, exist_ok=True)
-            
-            # Get list of image files (now including converted JPGs)
-            chapter_files = [f for f in os.listdir(chapter_dir) 
-                           if f.lower().endswith(('.jpg', '.png', '.jpeg'))]
+            # Get list of image files
+            chapter_files = sorted([f for f in os.listdir(chapter_dir) 
+                                  if f.lower().endswith(('.jpg', '.png', '.jpeg'))])
             total_files = len(chapter_files)
             
             if total_files == 0:
                 raise Exception("No image files found in chapter directory")
-
+            
             # Create monitoring thread
             self.translation_running = True
             monitor_thread = threading.Thread(
@@ -383,44 +430,56 @@ class MangaTranslatorService(QObject):
             )
             monitor_thread.start()
             
-            # Run translation with config parameters
-            from runindir import run_translation
-            logger.info(f"Starting translation for chapter {chapter.number}...")
+            # Run translation in a separate thread
+            def translation_worker():
+                try:
+                    # Run translation with config parameters
+                    run_translation(
+                        chapter_dir, 
+                        translated_dir,
+                        translator=self.config.translator,
+                        target_lang=self.config.target_language,
+                        upscale_ratio=self.config.upscale_ratio,
+                        colorize=self.config.colorize,
+                        use_gpu=self.config.use_gpu,
+                        force_uppercase=self.config.force_uppercase,
+                        ignore_error=self.config.ignore_error
+                    )
+                    
+                    # Stop monitoring
+                    self.translation_running = False
+                    monitor_thread.join()
+                    
+                    # Final check
+                    translated_files = [f for f in os.listdir(translated_dir) 
+                                     if f.lower().endswith(('.jpg', '.png', '.jpeg'))]
+                    if len(translated_files) != total_files:
+                        raise Exception("Not all files were translated")
+                    
+                    # After successful translation, add to completed list
+                    self.completed_translations.append(CompletedTranslation(
+                        chapter=chapter,
+                        completed_at=datetime.now(),
+                        path=translated_dir
+                    ))
+                    
+                    # Emit completion signal
+                    self.translation_completed.emit(translated_dir)
+                    
+                except Exception as e:
+                    logger.error(f"Error in translation worker: {e}")
+                    self.translation_error.emit(str(e))
+                    self.translation_running = False
             
-            # Pass config parameters to run_translation
-            run_translation(
-                chapter_dir, 
-                translated_dir,
-                translator=self.config.translator,
-                target_lang=self.config.target_language,
-                upscale_ratio=self.config.upscale_ratio,
-                colorize=self.config.colorize,
-                use_gpu=self.config.use_gpu,
-                force_uppercase=self.config.force_uppercase,
-                ignore_error=self.config.ignore_error
+            # Start translation thread
+            translation_thread = threading.Thread(
+                target=translation_worker,
+                daemon=True
             )
+            translation_thread.start()
             
-            logger.info("Translation completed")
-            
-            # Stop monitoring
-            self.translation_running = False
-            monitor_thread.join()
-            
-            # Final check
-            translated_files = [f for f in os.listdir(translated_dir) 
-                             if f.lower().endswith(('.jpg', '.png', '.jpeg'))]
-            if len(translated_files) != total_files:
-                raise Exception("Not all files were translated")
-            
-            # After successful translation, add to completed list
-            self.completed_translations.append(CompletedTranslation(
-                chapter=chapter,
-                completed_at=datetime.now(),
-                path=translated_dir
-            ))
-            
-            # Emit completion signal
-            self.translation_completed.emit(translated_dir)
+            # Wait for translation to complete
+            translation_thread.join()
             
         except Exception as e:
             logger.error(f"Error translating chapter {chapter.number}: {e}")
@@ -459,36 +518,40 @@ class MangaTranslatorService(QObject):
     
     def get_queue_status(self) -> tuple[int, TranslationTask]:
         """Get current queue status"""
-        with self._queue_lock:
-            queue_size = self.translation_queue.qsize()
-            current_task = self.current_task
+        with self._download_lock, self._translation_lock:
+            queue_size = self.download_queue.qsize() + self.translation_queue.qsize()
+            current_task = self.current_translation or self.current_download
         return queue_size, current_task
     
-    def clear_queue(self):
-        """Clear the translation queue"""
-        with self._queue_lock:
+    def clear_queues(self):
+        """Clear both download and translation queues"""
+        with self._download_lock:
+            while not self.download_queue.empty():
+                self.download_queue.get()
+                self.download_queue.task_done()
+        
+        with self._translation_lock:
             while not self.translation_queue.empty():
                 self.translation_queue.get()
                 self.translation_queue.task_done()
-            
-            # Reset status
-            self.queue_status = QueueStatus(queued_chapters=[])
-            self._emit_queue_status()
+        
+        # Reset status
+        self.queue_status = QueueStatus(queued_chapters=[])
+        self._emit_queue_status()
     
     def _emit_queue_status(self):
         """Emit current queue status"""
-        with self._queue_lock:
-            # Get list of queued chapters
-            queued_chapters = []
-            for item in list(self.translation_queue.queue):
-                queued_chapters.append(item)
+        with self._download_lock, self._translation_lock:
+            # Get list of queued items
+            download_items = list(self.download_queue.queue)
+            translation_items = list(self.translation_queue.queue)
             
             # Update status
             self.queue_status = QueueStatus(
-                current_task=self.current_task,
+                current_task=self.current_translation or self.current_download,
                 current_progress=self.queue_status.current_progress,
-                tasks_remaining=self.translation_queue.qsize(),
-                queued_chapters=queued_chapters
+                tasks_remaining=self.download_queue.qsize() + self.translation_queue.qsize(),
+                queued_chapters=download_items + translation_items
             )
             
             # Emit status
@@ -593,3 +656,77 @@ class MangaTranslatorService(QObject):
         if self.base_dir != self.config.manga_directory:
             self.base_dir = self.config.manga_directory
             os.makedirs(self.base_dir, exist_ok=True)
+    
+    def _download_from_html(self, chapter: Chapter, manga_id: str) -> str:
+        """
+        Download chapter images by parsing the chapter's HTML page
+        Returns path to the created zip file
+        """
+        logger.info(f"Starting HTML download for chapter {chapter.number}")
+        try:
+            manga_dir = os.path.join(self.base_dir, manga_id)
+            os.makedirs(manga_dir, exist_ok=True)
+            
+            # Parse image URLs from chapter page
+            image_urls = RawKumaParser.parse_chapter_images(chapter.url)
+            if not image_urls:
+                raise ValueError("No images found on chapter page")
+            
+            # Create temporary directory for downloads
+            with tempfile.TemporaryDirectory() as temp_dir:
+                downloaded_images = []
+                total_images = len(image_urls)
+                
+                # Download each image
+                for idx, img_url in enumerate(image_urls, 1):
+                    try:
+                        # Download image
+                        response = requests.get(img_url, stream=True)
+                        response.raise_for_status()
+                        
+                        # Load image data
+                        img_data = response.content
+                        img = Image.open(io.BytesIO(img_data))
+                        
+                        # Convert RGBA to RGB if necessary
+                        if img.mode in ('RGBA', 'LA'):
+                            background = Image.new('RGB', img.size, (255, 255, 255))
+                            background.paste(img, mask=img.split()[-1])
+                            img = background
+                        elif img.mode != 'RGB':
+                            img = img.convert('RGB')
+                        
+                        # Save image with padded number
+                        img_filename = f"{idx:03d}.jpg"
+                        img_path = os.path.join(temp_dir, img_filename)
+                        img.save(img_path, 'JPEG', quality=95)
+                        
+                        downloaded_images.append(img_path)
+                        
+                        # Report progress
+                        progress = (idx / total_images) * 100
+                        self.download_progress.emit(progress)
+                        logger.debug(f"Downloaded image {idx}/{total_images} ({progress:.1f}%)")
+                        
+                    except Exception as e:
+                        logger.error(f"Error downloading image {idx}: {e}")
+                        continue
+                
+                if not downloaded_images:
+                    raise ValueError("No images were successfully downloaded")
+                
+                # Create zip file
+                zip_path = os.path.join(manga_dir, f"chapter_{chapter.number}.zip")
+                with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                    for img_path in downloaded_images:
+                        zf.write(img_path, os.path.basename(img_path))
+                
+                logger.info(f"Successfully created zip with {len(downloaded_images)} images")
+                self.download_completed.emit(manga_dir)
+                return zip_path
+                
+        except Exception as e:
+            error_msg = f"Error in HTML download method: {str(e)}"
+            logger.error(error_msg)
+            self.download_error.emit(error_msg)
+            return None

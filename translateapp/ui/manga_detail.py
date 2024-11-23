@@ -8,7 +8,10 @@ from io import BytesIO
 import logging
 import threading
 from ..web_parser import RawKumaParser
-from ..manga_translator_service import MangaTranslatorService, QueueStatus
+from ..manga_translator_service import (
+    MangaTranslatorService, QueueStatus, 
+    TranslationTask, DownloadTask
+)
 from ..models import Manga, Chapter
 import os
 import json
@@ -161,24 +164,103 @@ class ChapterListItem(QWidget):
     def on_queue_status_changed(self, status: QueueStatus):
         """Handle queue status changes"""
         # Check if this chapter is current task
-        if status.current_task and status.current_task.chapter.number == self.chapter.number:
-            self.translate_btn.setEnabled(False)
-            self.translate_btn.setText("Translating...")
-            return
+        if status.current_task:
+            if isinstance(status.current_task, DownloadTask):
+                if status.current_task.chapter.number == self.chapter.number:
+                    self.translate_btn.setEnabled(False)
+                    self.translate_btn.setText("Downloading...")
+                    return
+            elif isinstance(status.current_task, TranslationTask):
+                if status.current_task.chapter.number == self.chapter.number:
+                    self.translate_btn.setEnabled(False)
+                    self.translate_btn.setText("Translating...")
+                    return
         
         # Check if this chapter is in queue
-        is_in_queue = False
+        is_in_download_queue = False
+        is_in_translation_queue = False
+        
         for task in status.queued_chapters:
             if task.chapter.number == self.chapter.number:
-                is_in_queue = True
-                break
+                if isinstance(task, DownloadTask):
+                    is_in_download_queue = True
+                    break
+                elif isinstance(task, TranslationTask):
+                    is_in_translation_queue = True
+                    break
         
-        # Update button state
-        self.translate_btn.setEnabled(not is_in_queue)
-        if is_in_queue:
-            self.translate_btn.setText("In Queue")
+        # Update button state based on queue status
+        self.translate_btn.setEnabled(not (is_in_download_queue or is_in_translation_queue))
+        if is_in_download_queue:
+            self.translate_btn.setText("Waiting for Download")
+            self.translate_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #FFA726;
+                    color: white;
+                    border: none;
+                    padding: 4px 8px;
+                    border-radius: 3px;
+                    font-size: 11px;
+                }
+                QPushButton:disabled {
+                    background-color: #FFA726;
+                    color: white;
+                    opacity: 0.7;
+                }
+            """)
+        elif is_in_translation_queue:
+            self.translate_btn.setText("Waiting for Translation")
+            self.translate_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #7E57C2;
+                    color: white;
+                    border: none;
+                    padding: 4px 8px;
+                    border-radius: 3px;
+                    font-size: 11px;
+                }
+                QPushButton:disabled {
+                    background-color: #7E57C2;
+                    color: white;
+                    opacity: 0.7;
+                }
+            """)
+        elif self.translator.is_translated(self.chapter, self.manga.url):
+            self.translate_btn.setText("Translated")
+            self.translate_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #4CAF50;
+                    color: white;
+                    border: none;
+                    padding: 4px 8px;
+                    border-radius: 3px;
+                    font-size: 11px;
+                }
+                QPushButton:disabled {
+                    background-color: #4CAF50;
+                    color: white;
+                    opacity: 0.7;
+                }
+            """)
         else:
             self.translate_btn.setText("Translate")
+            self.translate_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #2196F3;
+                    color: white;
+                    border: none;
+                    padding: 4px 8px;
+                    border-radius: 3px;
+                    font-size: 11px;
+                }
+                QPushButton:hover {
+                    background-color: #1E88E5;
+                }
+                QPushButton:disabled {
+                    background-color: #424242;
+                    color: #808080;
+                }
+            """)
     
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
